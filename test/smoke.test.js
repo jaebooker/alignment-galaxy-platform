@@ -151,6 +151,19 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     assert.equal(submissionResponse.state.submission_files.length, 1);
 
     await ren.login(renUser.id, "contributor");
+    const onboarding = await ren.request("/api/contributor/stripe/onboarding", {
+      method: "POST",
+      body: "{}"
+    });
+    assert.equal(onboarding.profile.payout_status, "needs_id_verification");
+    assert.match(onboarding.onboarding_url, /\/stripe\/connect\/return\?account=acct_demo_/);
+
+    const syncedProfile = await ren.request("/api/contributor/stripe/sync", {
+      method: "POST",
+      body: "{}"
+    });
+    assert.equal(syncedProfile.profile.payout_status, "stripe_ready");
+
     const secondClaim = await ren.request(`/api/tasks/${task.id}/claim`, {
       method: "POST",
       body: "{}"

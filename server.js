@@ -2,11 +2,15 @@ const http = require("node:http");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { readFile } = require("node:fs/promises");
+const { loadEnv } = require("./lib/env");
 const { createFileStorage } = require("./lib/fileStorage");
 const { createOAuthClient } = require("./lib/oauth");
 const { createPostgresStore, hashSessionToken } = require("./lib/postgresStore");
+const { createStripeConnectClient } = require("./lib/stripeConnect");
 
 const ROOT = __dirname;
+loadEnv(path.join(ROOT, ".env"));
+
 const PUBLIC_DIR = path.join(ROOT, "public");
 const SEED_FILE = path.join(ROOT, "data", "seed.json");
 const SCHEMA_FILE = path.join(ROOT, "database", "schema.sql");
@@ -45,6 +49,7 @@ const store = createPostgresStore({
 });
 const auth = createOAuthClient({ now: () => new Date() });
 const fileStorage = createFileStorage({ now });
+const stripeConnect = createStripeConnectClient({ now });
 
 async function loadState() {
   return store.read();
@@ -69,6 +74,16 @@ function normalizeState(state) {
   state.submission_files ||= [];
   state.payouts ||= [];
   state.review_standards ||= DEFAULT_REVIEW_STANDARDS;
+  state.contributor_profiles ||= [];
+  state.contributor_profiles.forEach((profile) => {
+    profile.stripe_charges_enabled ||= false;
+    profile.stripe_payouts_enabled ||= false;
+    profile.stripe_requirements_due ||= [];
+    profile.stripe_disabled_reason ||= null;
+    profile.stripe_onboarding_started_at ||= null;
+    profile.stripe_onboarded_at ||= null;
+    profile.stripe_last_synced_at ||= null;
+  });
   state.payouts.forEach((payout) => {
     payout.released_at ||= null;
     payout.released_by ||= null;
@@ -376,6 +391,56 @@ function getContributorProfile(state, userId) {
   return state.contributor_profiles.find((profile) => profile.user_id === userId);
 }
 
+function originForRequest(req) {
+  if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL.replace(/\/$/, "");
+  const proto = req.headers["x-forwarded-proto"] || "http";
+  return `${proto}://${req.headers.host || "localhost:3000"}`;
+}
+
+function stripeReturnUrl(req, accountId) {
+  const url = new URL("/stripe/connect/return", originForRequest(req));
+  url.searchParams.set("account", accountId);
+  return url.toString();
+}
+
+function stripeRefreshUrl(req, accountId) {
+  const url = new URL("/stripe/connect/refresh", originForRequest(req));
+  url.searchParams.set("account", accountId);
+  return url.toString();
+}
+
+function applyStripeAccountToProfile(state, profile, account) {
+  const status = stripeConnect.accountStatus(account);
+  profile.stripe_connect_account_id = account.id;
+  profile.payout_status = status;
+  profile.stripe_charges_enabled = Boolean(account.charges_enabled);
+  profile.stripe_payouts_enabled = Boolean(account.payouts_enabled);
+  profile.stripe_requirements_due = [
+    ...(account.requirements?.currently_due || []),
+    ...(account.requirements?.eventually_due || [])
+  ].filter((value, index, list) => value && list.indexOf(value) === index);
+  profile.stripe_disabled_reason = account.requirements?.disabled_reason || account.disabled_reason || null;
+  profile.stripe_last_synced_at = now();
+  if (status === "stripe_ready" && !profile.stripe_onboarded_at) {
+    profile.stripe_onboarded_at = now();
+  }
+  refreshContributorPayoutStatuses(state, profile.user_id);
+}
+
+function refreshContributorPayoutStatuses(state, contributorId) {
+  const profile = getContributorProfile(state, contributorId);
+  const ready = stripeConnect.accountCanReceiveTransfers(profile);
+  state.payouts
+    .filter((payout) => payout.contributor_id === contributorId && ["pending", "ready"].includes(payout.status))
+    .forEach((payout) => {
+      payout.status = ready ? "ready" : "pending";
+    });
+}
+
+function contributorCanReceiveTransfers(profile) {
+  return stripeConnect.accountCanReceiveTransfers(profile);
+}
+
 function getTask(state, taskId) {
   return state.tasks.find((task) => task.id === taskId);
 }
@@ -562,6 +627,7 @@ function clientState(state, context = {}) {
   return {
     ...publicState,
     auth: auth.publicConfig(),
+    stripe: stripeConnect.publicConfig(),
     session: sessionView(state, session),
     submission_files: (submissionFiles || []).map(publicSubmissionFile),
     delivery_packets: (deliveryPackets || []).map(publicDeliveryPacket),
@@ -839,7 +905,7 @@ async function reviewSubmission(req, res, state, submissionId) {
       contributor_id: submission.contributor_id,
       amount_cents: amountCents,
       platform_fee_cents: platformFeeCents,
-      status: profile?.payout_status === "stripe_ready" ? "ready" : "pending",
+      status: contributorCanReceiveTransfers(profile) ? "ready" : "pending",
       stripe_transfer_id: null,
       created_at: now()
     };
@@ -994,23 +1060,41 @@ async function releaseDeliveryPayouts(req, res, state, packetId) {
   const payouts = packetPayouts(state, packet);
   if (!payouts.length) return sendError(res, 409, "No payouts are attached to this delivery packet.");
 
-  const releaseable = payouts.filter((payout) => payout.status === "ready");
+  const releaseable = payouts.filter((payout) => {
+    const profile = getContributorProfile(state, payout.contributor_id);
+    return payout.status === "ready" && contributorCanReceiveTransfers(profile);
+  });
   if (!releaseable.length) {
-    return sendError(res, 409, "No Stripe-ready payouts are ready to release.");
+    return sendError(res, 409, "No payouts have Stripe-ready connected accounts.");
   }
 
   const releasedAt = now();
   const note = String(body.note || "").trim() || "Released after customer approval.";
-  releaseable.forEach((payout) => {
-    payout.status = "transferred";
-    payout.stripe_transfer_id ||= `tr_demo_${payout.id.replace(/-/g, "").slice(0, 18)}`;
-    payout.released_at = releasedAt;
-    payout.released_by = user.id;
-    payout.release_note = note;
-
+  const failed = [];
+  for (const payout of releaseable) {
+    const profile = getContributorProfile(state, payout.contributor_id);
     const submission = state.submissions.find((candidate) => candidate.id === payout.submission_id);
-    if (submission) submission.status = "paid";
-  });
+    try {
+      const transfer = await stripeConnect.createTransfer({
+        amountCents: payout.amount_cents,
+        destinationAccountId: profile.stripe_connect_account_id,
+        payoutId: payout.id,
+        taskId: submission?.task_id || packet.task_id,
+        contributorId: payout.contributor_id,
+        description: `Alignment Galaxy payout for ${submission?.task_id || packet.task_id}`
+      });
+      payout.status = "transferred";
+      payout.stripe_transfer_id = transfer.id;
+      payout.released_at = releasedAt;
+      payout.released_by = user.id;
+      payout.release_note = note;
+      if (submission) submission.status = "paid";
+    } catch (error) {
+      payout.status = "failed";
+      payout.release_note = error.message || "Stripe transfer failed.";
+      failed.push(payout);
+    }
+  }
 
   const packetPayoutState = packetPayouts(state, packet);
   const allTransferred = packetPayoutState.every((payout) => payout.status === "transferred");
@@ -1025,13 +1109,92 @@ async function releaseDeliveryPayouts(req, res, state, packetId) {
   });
 
   const summary = {
-    released_count: releaseable.length,
+    released_count: releaseable.length - failed.length,
+    failed_count: failed.length,
     held_count: packetPayoutState.filter((payout) => payout.status === "pending" || payout.status === "held").length,
     transferred_count: packetPayoutState.filter((payout) => payout.status === "transferred").length
   };
   addActivity(state, "payouts_released", `${user.name} released ${summary.released_count} payout${summary.released_count === 1 ? "" : "s"} for "${task?.title || "a task"}".`);
   await saveState(state);
   sendJson(res, 200, { delivery_packet: packet, release_summary: summary, state: clientState(state, { session }) });
+}
+
+async function beginStripeOnboarding(req, res, state) {
+  const { session, user } = requireSession(state, req, ["contributor"]);
+  const profile = getContributorProfile(state, user.id);
+  if (!profile) return sendError(res, 403, "Contributor profile required.");
+
+  let accountId = profile.stripe_connect_account_id;
+  if (!accountId || (stripeConnect.configured && accountId.startsWith("acct_demo_"))) {
+    const account = await stripeConnect.createAccount({ user });
+    applyStripeAccountToProfile(state, profile, account);
+    accountId = account.id;
+  }
+
+  profile.stripe_onboarding_started_at = now();
+  const link = await stripeConnect.createAccountLink({
+    accountId,
+    returnUrl: stripeReturnUrl(req, accountId),
+    refreshUrl: stripeRefreshUrl(req, accountId)
+  });
+  addActivity(state, "stripe_onboarding_started", `${user.name} started Stripe Connect onboarding.`);
+  await saveState(state);
+  sendJson(res, 200, {
+    onboarding_url: link.url,
+    profile,
+    stripe: stripeConnect.publicConfig(),
+    state: clientState(state, { session })
+  });
+}
+
+async function syncStripeProfile(req, res, state) {
+  const { session, user } = requireSession(state, req, ["contributor"]);
+  const profile = getContributorProfile(state, user.id);
+  if (!profile) return sendError(res, 403, "Contributor profile required.");
+  if (!profile.stripe_connect_account_id) return sendError(res, 409, "Start Stripe onboarding before syncing payout status.");
+
+  const account = await stripeConnect.retrieveAccount(profile.stripe_connect_account_id);
+  applyStripeAccountToProfile(state, profile, account);
+  addActivity(state, "stripe_profile_synced", `${user.name} synced Stripe Connect payout status.`);
+  await saveState(state);
+  sendJson(res, 200, { profile, state: clientState(state, { session }) });
+}
+
+async function handleStripeConnectReturn(req, res, url) {
+  const state = await loadState();
+  const { session, user } = requireSession(state, req, ["contributor"]);
+  const profile = getContributorProfile(state, user.id);
+  if (!profile) return sendRedirect(res, "/");
+
+  const accountId = url.searchParams.get("account") || profile.stripe_connect_account_id;
+  if (!accountId || accountId !== profile.stripe_connect_account_id) {
+    return sendError(res, 403, "Stripe account does not match the current contributor.");
+  }
+
+  const account = await stripeConnect.retrieveAccount(accountId);
+  applyStripeAccountToProfile(state, profile, account);
+  addActivity(state, "stripe_onboarding_returned", `${user.name} returned from Stripe Connect onboarding.`);
+  await saveState(state);
+  sendRedirect(res, "/?stripe=returned");
+}
+
+async function handleStripeConnectRefresh(req, res, url) {
+  const state = await loadState();
+  const { user } = requireSession(state, req, ["contributor"]);
+  const profile = getContributorProfile(state, user.id);
+  const accountId = url.searchParams.get("account") || profile?.stripe_connect_account_id;
+  if (!profile || !accountId || accountId !== profile.stripe_connect_account_id) {
+    return sendError(res, 403, "Stripe account does not match the current contributor.");
+  }
+
+  const link = await stripeConnect.createAccountLink({
+    accountId,
+    returnUrl: stripeReturnUrl(req, accountId),
+    refreshUrl: stripeRefreshUrl(req, accountId)
+  });
+  profile.stripe_onboarding_started_at = now();
+  await saveState(state);
+  sendRedirect(res, link.url);
 }
 
 async function submitScreening(req, res, state) {
@@ -1203,6 +1366,14 @@ async function handleApi(req, res, url) {
     return submitScreening(req, res, state);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/contributor/stripe/onboarding") {
+    return beginStripeOnboarding(req, res, state);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/contributor/stripe/sync") {
+    return syncStripeProfile(req, res, state);
+  }
+
   sendError(res, 404, "API route not found.");
 }
 
@@ -1216,6 +1387,18 @@ async function handleAuth(req, res, url) {
   }
 
   sendError(res, 404, "Auth route not found.");
+}
+
+async function handleStripe(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/stripe/connect/return") {
+    return handleStripeConnectReturn(req, res, url);
+  }
+
+  if (req.method === "GET" && url.pathname === "/stripe/connect/refresh") {
+    return handleStripeConnectRefresh(req, res, url);
+  }
+
+  sendError(res, 404, "Stripe route not found.");
 }
 
 async function serveStatic(req, res, url) {
@@ -1250,6 +1433,8 @@ function createAppServer() {
         await handleApi(req, res, url);
       } else if (url.pathname.startsWith("/auth/")) {
         await handleAuth(req, res, url);
+      } else if (url.pathname.startsWith("/stripe/")) {
+        await handleStripe(req, res, url);
       } else {
         await serveStatic(req, res, url);
       }

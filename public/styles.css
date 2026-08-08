@@ -721,6 +721,10 @@ th {
   gap: 10px;
 }
 
+.criterion-list.compact-list {
+  margin-top: 10px;
+}
+
 .criterion-item,
 .comparison-item,
 .deliverable-card {

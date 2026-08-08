@@ -51,7 +51,14 @@
       "approval_rate": 0.91,
       "completed_tasks": 8,
       "payout_status": "stripe_ready",
-      "stripe_connect_account_id": "acct_demo_maya"
+      "stripe_connect_account_id": "acct_demo_maya",
+      "stripe_charges_enabled": true,
+      "stripe_payouts_enabled": true,
+      "stripe_requirements_due": [],
+      "stripe_disabled_reason": null,
+      "stripe_onboarding_started_at": "2026-08-07T12:00:00.000Z",
+      "stripe_onboarded_at": "2026-08-07T12:00:00.000Z",
+      "stripe_last_synced_at": "2026-08-07T12:00:00.000Z"
     },
     {
       "user_id": "22222222-2222-4222-8222-222222222222",
@@ -61,7 +68,14 @@
       "approval_rate": 0.78,
       "completed_tasks": 3,
       "payout_status": "needs_id_verification",
-      "stripe_connect_account_id": null
+      "stripe_connect_account_id": null,
+      "stripe_charges_enabled": false,
+      "stripe_payouts_enabled": false,
+      "stripe_requirements_due": ["external_account"],
+      "stripe_disabled_reason": null,
+      "stripe_onboarding_started_at": null,
+      "stripe_onboarded_at": null,
+      "stripe_last_synced_at": null
     }
   ],
   "customer_orgs": [

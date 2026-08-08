@@ -7,17 +7,22 @@ This is the first working MVP slice for Alignment Galaxy: a marketplace where ve
 ```bash
 npm install
 docker compose up -d db
-DATABASE_URL=postgres://alignment_galaxy:alignment_galaxy@localhost:5432/alignment_galaxy npm start
+npm start
 ```
 
 Open `http://localhost:3000`.
 
+The app auto-loads an ignored local `.env` file before starting. The checked-in `.env.example` documents the expected variables; copy values from it or edit `.env` locally for database, Stripe, OAuth, upload, and base URL settings.
+
 The app uses Postgres for persistence. On first launch, `lib/postgresStore.js` runs `database/schema.sql` and seeds an empty database from `data/seed.json`.
 
 For SSL-required hosted Postgres providers, include `sslmode=require` in `DATABASE_URL` or set `PGSSLMODE=require`.
-`.env.example` documents the expected environment variables for hosts that load env files.
 
 Uploaded artifact files are stored on disk under `ALIGNMENT_GALAXY_UPLOAD_DIR`, which defaults to `storage/artifacts`. Metadata, hashes, and access checks are stored in Postgres through `submission_files`. The default upload limit is 10 MB per file and can be changed with `ALIGNMENT_GALAXY_MAX_UPLOAD_BYTES`.
+
+## Stripe Connect Setup
+
+Set `STRIPE_SECRET_KEY`, `STRIPE_CONNECT_COUNTRY`, `STRIPE_CURRENCY`, and `APP_BASE_URL` to enable real Stripe Connect onboarding links and transfer creation. Without `STRIPE_SECRET_KEY`, the app runs in demo mode: contributor onboarding marks the local profile ready and payout release records deterministic `tr_demo_*` transfer IDs without contacting Stripe.
 
 ## OAuth Setup
 
@@ -43,15 +48,16 @@ npm test
 - OAuth-backed sessions: Auth0, Clerk, or generic OIDC sign-in links external identities to platform users, hashes session tokens, and keeps role checks server-side.
 - Contributor marketplace: browse open tasks, claim gated tasks, submit artifacts, complete a screening task.
 - Uploaded artifacts: contributors can attach files to submissions, and authorized contributors, reviewers, admins, and owning customers can download them.
+- Stripe Connect onboarding: contributors can start hosted onboarding, sync account requirements, and expose payout readiness to review/admin workflows.
 - Customer workspace: create new commercial or public-good tasks and monitor engagement status.
 - Reviewer queue: inspect submitted work, score it, approve or reject it.
 - Customer delivery packets: assemble approved submissions into buyer-facing packets, export Markdown reports, and record customer approval or requested changes.
-- Admin operations: monitor public-good allocation, reputation, review backlog, delivery readiness, and release customer-approved payouts.
+- Admin operations: monitor public-good allocation, reputation, review backlog, delivery readiness, and release customer-approved payouts through Stripe transfers.
 - API foundation: task posting, claiming, submission, review, delivery export, customer approval, payout release, screening, reset, and bootstrap endpoints.
 - Database foundation: `database/schema.sql` maps the MVP objects to Postgres tables.
 - Storage adapter: `lib/postgresStore.js` reads and writes the app state through the relational schema.
 
 ## Next Build Steps
 
-- Connect Stripe Connect for contributor onboarding and transfers.
+- Add Stripe webhooks for account requirement changes and transfer failure reconciliation.
 - Generate branded PDF reports from exported delivery packet Markdown.

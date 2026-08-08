@@ -34,6 +34,10 @@ const statusLabels = {
   transferred: "Transferred",
   failed: "Failed",
   held: "Held",
+  not_started: "Not started",
+  needs_id_verification: "Needs ID",
+  stripe_ready: "Stripe ready",
+  paused: "Paused",
   public_good: "Public good",
   commercial: "Commercial",
   sensitive: "Sensitive",
@@ -243,6 +247,10 @@ function currentUserId() {
 
 function currentAuth() {
   return state?.auth || { enabled: false, provider: "OAuth", login_url: "/auth/login", logout_url: "/api/session/logout" };
+}
+
+function currentStripe() {
+  return state?.stripe || { enabled: false, mode: "demo", currency: "usd" };
 }
 
 function currentPath() {
@@ -527,6 +535,32 @@ function taskDetail(task) {
   `;
 }
 
+function stripeConnectPanel(profile) {
+  const stripe = currentStripe();
+  const due = profile.stripe_requirements_due || [];
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Payout account</h2>
+        ${statusPill(profile.payout_status || "not_started")}
+      </div>
+      <div class="meta-grid">
+        <div><span>Stripe mode</span><strong>${escapeHtml(stripe.mode || "demo")}</strong></div>
+        <div><span>Account</span><strong>${escapeHtml(profile.stripe_connect_account_id || "Not connected")}</strong></div>
+        <div><span>Last sync</span><strong>${profile.stripe_last_synced_at ? dateTimeLabel(profile.stripe_last_synced_at) : "Never"}</strong></div>
+      </div>
+      <div class="criterion-list compact-list">
+        ${due.length ? due.map((item) => `<div class="criterion-item">${escapeHtml(item)}</div>`).join("") : `<div class="criterion-item">No outstanding Stripe requirements.</div>`}
+        ${profile.stripe_disabled_reason ? `<div class="criterion-item">${escapeHtml(profile.stripe_disabled_reason)}</div>` : ""}
+      </div>
+      <div class="button-row">
+        <button class="btn primary" data-action="stripe-onboarding">${profile.stripe_connect_account_id ? "Open onboarding" : "Start onboarding"}</button>
+        <button class="btn secondary" data-action="stripe-sync" ${profile.stripe_connect_account_id ? "" : "disabled"}>Sync status</button>
+      </div>
+    </section>
+  `;
+}
+
 function contributorView() {
   const task = selectedTask();
   const profile = profileFor(currentUserId()) || { verification_tier: 0, reputation_score: 0, approval_rate: 0 };
@@ -541,6 +575,7 @@ function contributorView() {
         </div>
       </div>
       ${quickStats()}
+      ${stripeConnectPanel(profile)}
       <div class="two-column">
         <section class="panel">
           <div class="panel-header">
@@ -932,7 +967,7 @@ function adminView() {
               <div class="payout-row">
                 <div>
                   <strong>${escapeHtml(userName(payout.contributor_id))}</strong>
-                  <p>${money(payout.amount_cents)} contributor payout · ${money(payout.platform_fee_cents)} platform fee${payout.released_at ? ` · ${escapeHtml(dateTimeLabel(payout.released_at))}` : ""}</p>
+                  <p>${money(payout.amount_cents)} contributor payout · ${money(payout.platform_fee_cents)} platform fee · ${escapeHtml(profileFor(payout.contributor_id)?.stripe_connect_account_id || "No connected account")}${payout.released_at ? ` · ${escapeHtml(dateTimeLabel(payout.released_at))}` : ""}</p>
                 </div>
                 ${statusPill(payout.status)}
               </div>
@@ -1164,6 +1199,38 @@ function bindEvents() {
         });
         state = result.state;
         showToast("Screening response recorded.");
+        render();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-action='stripe-onboarding']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        const result = await api("/api/contributor/stripe/onboarding", {
+          method: "POST",
+          body: "{}"
+        });
+        state = result.state;
+        showToast("Opening Stripe onboarding.");
+        window.location.href = result.onboarding_url;
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-action='stripe-sync']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        const result = await api("/api/contributor/stripe/sync", {
+          method: "POST",
+          body: "{}"
+        });
+        state = result.state;
+        showToast("Stripe status synced.");
         render();
       } catch (error) {
         showToast(error.message);

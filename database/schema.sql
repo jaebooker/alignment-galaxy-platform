@@ -43,8 +43,24 @@ CREATE TABLE IF NOT EXISTS contributor_profiles (
   completed_tasks INTEGER NOT NULL DEFAULT 0,
   payout_status TEXT NOT NULL DEFAULT 'not_started'
     CHECK (payout_status IN ('not_started', 'needs_id_verification', 'stripe_ready', 'paused')),
-  stripe_connect_account_id TEXT
+  stripe_connect_account_id TEXT,
+  stripe_charges_enabled BOOLEAN NOT NULL DEFAULT false,
+  stripe_payouts_enabled BOOLEAN NOT NULL DEFAULT false,
+  stripe_requirements_due TEXT[] NOT NULL DEFAULT '{}',
+  stripe_disabled_reason TEXT,
+  stripe_onboarding_started_at TIMESTAMPTZ,
+  stripe_onboarded_at TIMESTAMPTZ,
+  stripe_last_synced_at TIMESTAMPTZ
 );
+
+ALTER TABLE contributor_profiles
+  ADD COLUMN IF NOT EXISTS stripe_charges_enabled BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS stripe_payouts_enabled BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS stripe_requirements_due TEXT[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS stripe_disabled_reason TEXT,
+  ADD COLUMN IF NOT EXISTS stripe_onboarding_started_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS stripe_onboarded_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS stripe_last_synced_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS customer_orgs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
