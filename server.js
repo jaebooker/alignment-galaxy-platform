@@ -2,6 +2,7 @@ const http = require("node:http");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { readFile } = require("node:fs/promises");
+const { createFileStorage } = require("./lib/fileStorage");
 const { createOAuthClient } = require("./lib/oauth");
 const { createPostgresStore, hashSessionToken } = require("./lib/postgresStore");
 
@@ -26,6 +27,7 @@ const DEFAULT_REVIEW_STANDARDS = [
   "Claims are specific, reproducible, and separated from speculation.",
   "Reviewer notes identify false positive risks, false negative risks, and any recommended follow-up."
 ];
+const MAX_MULTIPART_FILES = 5;
 
 function now() {
   return new Date().toISOString();
@@ -42,6 +44,7 @@ const store = createPostgresStore({
   now
 });
 const auth = createOAuthClient({ now: () => new Date() });
+const fileStorage = createFileStorage({ now });
 
 async function loadState() {
   return store.read();
@@ -63,6 +66,7 @@ function normalizeState(state) {
   state.sessions ||= [];
   state.auth_identities ||= [];
   state.delivery_packets ||= [];
+  state.submission_files ||= [];
   state.review_standards ||= DEFAULT_REVIEW_STANDARDS;
   state.tasks ||= [];
   state.tasks.forEach((task) => {
@@ -98,6 +102,15 @@ function sendRedirect(res, location, headers = {}) {
   res.end();
 }
 
+function sendBinary(res, statusCode, buffer, headers = {}) {
+  res.writeHead(statusCode, {
+    "cache-control": "private, max-age=60",
+    "content-length": buffer.length,
+    ...headers
+  });
+  res.end(buffer);
+}
+
 function httpError(statusCode, message) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -121,6 +134,11 @@ function clearSessionCookie() {
   return `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
 }
 
+function attachmentDisposition(fileName) {
+  const fallback = String(fileName || "artifact").replace(/[^\x20-\x7E]|["\\\r\n]/g, "_");
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(fileName || "artifact")}`;
+}
+
 function publicUser(user) {
   if (!user) return null;
   return {
@@ -129,6 +147,20 @@ function publicUser(user) {
     email: user.email,
     roles: user.roles,
     verification_status: user.verification_status
+  };
+}
+
+function publicSubmissionFile(file) {
+  return {
+    id: file.id,
+    submission_id: file.submission_id,
+    uploaded_by: file.uploaded_by,
+    original_name: file.original_name,
+    content_type: file.content_type,
+    size_bytes: file.size_bytes,
+    checksum_sha256: file.checksum_sha256,
+    created_at: file.created_at,
+    download_url: `/api/submissions/${encodeURIComponent(file.submission_id)}/files/${encodeURIComponent(file.id)}`
   };
 }
 
@@ -270,6 +302,48 @@ async function readBody(req) {
   }
 }
 
+async function readSubmissionBody(req) {
+  const contentType = req.headers["content-type"] || "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
+    return {
+      ...(await readBody(req)),
+      files: []
+    };
+  }
+
+  const contentLength = Number(req.headers["content-length"] || 0);
+  const maxRequestBytes = (fileStorage.maxBytes * MAX_MULTIPART_FILES) + (128 * 1024);
+  if (contentLength > maxRequestBytes) {
+    throw httpError(413, "Upload request is too large.");
+  }
+
+  const form = await new Request(`http://${req.headers.host || "localhost"}/`, {
+    method: req.method,
+    headers: req.headers,
+    body: req,
+    duplex: "half"
+  }).formData();
+  const body = { files: [] };
+
+  for (const [name, value] of form.entries()) {
+    if (typeof value === "string") {
+      body[name] = value;
+      continue;
+    }
+    if (!value || typeof value.arrayBuffer !== "function" || value.size === 0) continue;
+    if (body.files.length >= MAX_MULTIPART_FILES) {
+      throw httpError(400, `Upload at most ${MAX_MULTIPART_FILES} files per submission.`);
+    }
+    body.files.push({
+      buffer: Buffer.from(await value.arrayBuffer()),
+      contentType: value.type || "application/octet-stream",
+      originalName: value.name || name || "artifact"
+    });
+  }
+
+  return body;
+}
+
 function getUser(state, userId) {
   return state.users.find((user) => user.id === userId);
 }
@@ -286,8 +360,24 @@ function taskSubmissions(state, taskId) {
   return state.submissions.filter((submission) => submission.task_id === taskId);
 }
 
+function filesForSubmission(state, submissionId) {
+  return state.submission_files.filter((file) => file.submission_id === submissionId);
+}
+
 function approvedSubmissions(state, taskId) {
   return taskSubmissions(state, taskId).filter((submission) => submission.status === "approved");
+}
+
+function canAccessSubmission(state, context, submission) {
+  if (!context || !submission) return false;
+  const { session, user } = context;
+  if (submission.contributor_id === user.id) return true;
+  if (session.active_role === "reviewer" || session.active_role === "admin") return true;
+  if (session.active_role !== "customer") return false;
+
+  const task = getTask(state, submission.task_id);
+  const org = state.customer_orgs.find((candidate) => candidate.id === task?.sponsoring_org_id);
+  return org?.contact_user_id === user.id;
 }
 
 function updateTaskStatus(state, task) {
@@ -328,13 +418,19 @@ function computeMetrics(state) {
 }
 
 function clientState(state, context = {}) {
-  const { auth_identities: _authIdentities, sessions: _sessions, ...publicState } = state;
+  const {
+    auth_identities: _authIdentities,
+    sessions: _sessions,
+    submission_files: submissionFiles,
+    ...publicState
+  } = state;
   const session = context.session || (context.req ? currentSessionContext(state, context.req)?.session : null);
 
   return {
     ...publicState,
     auth: auth.publicConfig(),
     session: sessionView(state, session),
+    submission_files: (submissionFiles || []).map(publicSubmissionFile),
     metrics: computeMetrics(state)
   };
 }
@@ -498,8 +594,12 @@ async function claimTask(req, res, state, taskId) {
 
 async function submitTask(req, res, state, taskId) {
   const { session, user } = requireSession(state, req, ["contributor"]);
-  const body = await readBody(req);
-  requireFields(body, ["artifact"]);
+  const body = await readSubmissionBody(req);
+  const artifactText = String(body.artifact || "").trim();
+  const uploadFiles = body.files || [];
+  if (!artifactText && uploadFiles.length === 0) {
+    return sendError(res, 400, "Submission requires artifact text or at least one uploaded file.");
+  }
 
   const task = getTask(state, taskId);
   if (!task) return sendError(res, 404, "Task not found.");
@@ -513,19 +613,51 @@ async function submitTask(req, res, state, taskId) {
     id: createId("sub"),
     task_id: taskId,
     contributor_id: user.id,
-    artifact: String(body.artifact).trim(),
+    artifact: artifactText || uploadFiles.map((file) => `Uploaded file: ${file.originalName}`).join("\n"),
     notes: String(body.notes || "").trim(),
     status: "submitted",
     review_outcome: null,
     score: null,
     created_at: now()
   };
+  const savedFiles = [];
+  for (const file of uploadFiles) {
+    savedFiles.push(await fileStorage.save({
+      ...file,
+      submissionId: submission.id,
+      uploadedBy: user.id
+    }));
+  }
 
   state.submissions.unshift(submission);
+  state.submission_files.unshift(...savedFiles);
   updateTaskStatus(state, task);
-  addActivity(state, "submission_created", `${user.name} submitted work for "${task.title}".`);
+  addActivity(state, "submission_created", `${user.name} submitted work${savedFiles.length ? ` with ${savedFiles.length} file${savedFiles.length === 1 ? "" : "s"}` : ""} for "${task.title}".`);
   await saveState(state);
-  sendJson(res, 201, { submission, task, state: clientState(state, { session }) });
+  sendJson(res, 201, {
+    submission,
+    files: savedFiles.map(publicSubmissionFile),
+    task,
+    state: clientState(state, { session })
+  });
+}
+
+async function downloadSubmissionFile(req, res, state, submissionId, fileId) {
+  const context = requireSession(state, req);
+  const submission = state.submissions.find((candidate) => candidate.id === submissionId);
+  if (!submission) return sendError(res, 404, "Submission not found.");
+  if (!canAccessSubmission(state, context, submission)) {
+    return sendError(res, 403, "You do not have access to this submission file.");
+  }
+
+  const file = filesForSubmission(state, submissionId).find((candidate) => candidate.id === fileId);
+  if (!file) return sendError(res, 404, "Submission file not found.");
+  const buffer = await fileStorage.read(file.storage_key);
+  sendBinary(res, 200, buffer, {
+    "content-type": file.content_type || "application/octet-stream",
+    "content-disposition": attachmentDisposition(file.original_name),
+    "x-content-type-options": "nosniff"
+  });
 }
 
 async function reviewSubmission(req, res, state, submissionId) {
@@ -739,6 +871,7 @@ async function handleApi(req, res, url) {
     if (!testAuthEnabled() && process.env.ALLOW_DATA_RESET !== "true") {
       requireSession(state, req, ["admin"]);
     }
+    await fileStorage.clear();
     const reset = await resetState();
     return sendJson(res, 200, clientState(reset), {
       "set-cookie": clearSessionCookie()
@@ -755,6 +888,10 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "tasks" && parts[3] === "submissions") {
     return submitTask(req, res, state, parts[2]);
+  }
+
+  if (req.method === "GET" && parts.length === 5 && parts[0] === "api" && parts[1] === "submissions" && parts[3] === "files") {
+    return downloadSubmissionFile(req, res, state, parts[2], parts[4]);
   }
 
   if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "tasks" && parts[3] === "delivery-packet") {

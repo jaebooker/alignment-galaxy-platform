@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS submissions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS submission_files (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+  uploaded_by UUID NOT NULL REFERENCES users(id),
+  storage_key TEXT NOT NULL UNIQUE,
+  original_name TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+  checksum_sha256 TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS reviews (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
@@ -172,6 +184,7 @@ CREATE TABLE IF NOT EXISTS delivery_packets (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_commerciality ON tasks(commerciality);
 CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);
+CREATE INDEX IF NOT EXISTS idx_submission_files_submission ON submission_files(submission_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_reviewer ON reviews(reviewer_id);
 CREATE INDEX IF NOT EXISTS idx_payouts_status ON payouts(status);
 CREATE INDEX IF NOT EXISTS idx_delivery_packets_status ON delivery_packets(status);

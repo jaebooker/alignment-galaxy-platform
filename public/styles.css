@@ -666,6 +666,38 @@ th {
   line-height: 1.5;
 }
 
+.file-list {
+  display: grid;
+  gap: 8px;
+}
+
+.file-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.file-link strong,
+.file-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-link span {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .criterion-list,
 .comparison-list,
 .deliverable-grid {

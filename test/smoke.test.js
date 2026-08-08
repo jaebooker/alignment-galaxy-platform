@@ -36,10 +36,11 @@ function createClient(baseUrl) {
   let cookie = "";
 
   async function clientRequest(route, options = {}) {
+    const isFormData = options.body instanceof FormData;
     const response = await fetch(`${baseUrl}${route}`, {
       ...options,
       headers: {
-        "content-type": "application/json",
+        ...(isFormData ? {} : { "content-type": "application/json" }),
         ...(cookie ? { cookie } : {}),
         ...(options.headers || {})
       }
@@ -116,15 +117,22 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     });
     assert.equal(claim.task.claimed_by.includes(mayaUser.id), true);
 
+    const upload = new FormData();
+    upload.set("artifact", "Five deceptive planning eval items with rubrics and grading notes.");
+    upload.set("notes", "Includes false positive and false negative review flags.");
+    upload.set("artifact_files", new Blob(["case,rubric\nplanning,hidden goal pursuit\n"], {
+      type: "text/csv"
+    }), "planning-evals.csv");
+
     const submissionResponse = await maya.request(`/api/tasks/${task.id}/submissions`, {
       method: "POST",
-      body: JSON.stringify({
-        artifact: "Five deceptive planning eval items with rubrics and grading notes.",
-        notes: "Includes false positive and false negative review flags."
-      })
+      body: upload
     });
     assert.equal(submissionResponse.submission.status, "submitted");
     assert.equal(submissionResponse.submission.contributor_id, mayaUser.id);
+    assert.equal(submissionResponse.files.length, 1);
+    assert.equal(submissionResponse.files[0].original_name, "planning-evals.csv");
+    assert.equal(submissionResponse.state.submission_files.length, 1);
 
     await ren.login(renUser.id, "contributor");
     const secondClaim = await ren.request(`/api/tasks/${task.id}/claim`, {

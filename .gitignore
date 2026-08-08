@@ -1,4 +1,5 @@
 data/alignment-galaxy.local.json
+storage/artifacts/
 node_modules/
 .DS_Store
 .env

@@ -17,6 +17,8 @@ The app uses Postgres for persistence. On first launch, `lib/postgresStore.js` r
 For SSL-required hosted Postgres providers, include `sslmode=require` in `DATABASE_URL` or set `PGSSLMODE=require`.
 `.env.example` documents the expected environment variables for hosts that load env files.
 
+Uploaded artifact files are stored on disk under `ALIGNMENT_GALAXY_UPLOAD_DIR`, which defaults to `storage/artifacts`. Metadata, hashes, and access checks are stored in Postgres through `submission_files`. The default upload limit is 10 MB per file and can be changed with `ALIGNMENT_GALAXY_MAX_UPLOAD_BYTES`.
+
 ## OAuth Setup
 
 The app supports generic OIDC, Auth0, or Clerk through the same callback route:
@@ -40,6 +42,7 @@ npm test
 
 - OAuth-backed sessions: Auth0, Clerk, or generic OIDC sign-in links external identities to platform users, hashes session tokens, and keeps role checks server-side.
 - Contributor marketplace: browse open tasks, claim gated tasks, submit artifacts, complete a screening task.
+- Uploaded artifacts: contributors can attach files to submissions, and authorized contributors, reviewers, admins, and owning customers can download them.
 - Customer workspace: create new commercial or public-good tasks and monitor engagement status.
 - Reviewer queue: inspect submitted work, score it, approve or reject it.
 - Customer delivery packets: assemble approved submissions into buyer-facing packets with review summaries.
@@ -51,5 +54,4 @@ npm test
 ## Next Build Steps
 
 - Connect Stripe Connect for contributor onboarding and transfers.
-- Add file storage for uploaded submission artifacts.
 - Turn delivery packets into exported reports with customer approval and payout release controls.

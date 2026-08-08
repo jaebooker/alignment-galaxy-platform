@@ -50,6 +50,13 @@ function money(cents) {
   }).format((Number(cents) || 0) / 100);
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
 function dateLabel(date) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${date}T12:00:00Z`));
 }
@@ -99,6 +106,40 @@ function reviewForSubmission(submissionId) {
 
 function packetForTask(taskId) {
   return (state.delivery_packets || []).find((packet) => packet.task_id === taskId);
+}
+
+function submissionFilesFor(submissionId) {
+  return (state.submission_files || []).filter((file) => file.submission_id === submissionId);
+}
+
+function submissionFileLinks(submissionId) {
+  const files = submissionFilesFor(submissionId);
+  if (!files.length) return "";
+  return `
+    <div class="file-list">
+      ${files.map((file) => `
+        <a class="file-link" href="${escapeHtml(file.download_url)}">
+          <strong>${escapeHtml(file.original_name)}</strong>
+          <span>${escapeHtml(file.content_type)} · ${formatBytes(file.size_bytes)}</span>
+        </a>
+      `).join("")}
+    </div>
+  `;
+}
+
+function deliveryFileLinks(packet) {
+  const files = (packet.approved_submission_ids || []).flatMap((submissionId) => submissionFilesFor(submissionId));
+  if (!files.length) return "";
+  return `
+    <div class="file-list">
+      ${files.map((file) => `
+        <a class="file-link" href="${escapeHtml(file.download_url)}">
+          <strong>${escapeHtml(file.original_name)}</strong>
+          <span>${formatBytes(file.size_bytes)}</span>
+        </a>
+      `).join("")}
+    </div>
+  `;
 }
 
 function scoreLabel(value) {
@@ -156,10 +197,11 @@ function selectedSubmission() {
 }
 
 async function api(route, options = {}) {
+  const isFormData = options.body instanceof FormData;
   const response = await fetch(route, {
     ...options,
     headers: {
-      "content-type": "application/json",
+      ...(isFormData ? {} : { "content-type": "application/json" }),
       ...(options.headers || {})
     }
   });
@@ -378,6 +420,9 @@ function taskDetail(task) {
               <label>Reviewer notes
                 <textarea name="notes" ${submitted ? "disabled" : ""}></textarea>
               </label>
+              <label>Artifact files
+                <input name="artifact_files" type="file" multiple ${submitted ? "disabled" : ""}>
+              </label>
             </div>
             <div class="button-row">
               <button class="btn secondary" ${submitted ? "disabled" : ""}>Submit work</button>
@@ -482,6 +527,7 @@ function customerDeliverables() {
                   <div><span>Confidence</span><strong>${scoreLabel(packet.average_reviewer_confidence)}</strong></div>
                 </div>
                 <div class="artifact-block">${escapeHtml(packet.review_summary)}</div>
+                ${deliveryFileLinks(packet)}
                 <div class="artifact-block">${escapeHtml(packet.risk_notes)}</div>
               </article>
             `;
@@ -611,6 +657,7 @@ Can be reviewed without private customer context.</textarea>
 
 function queueItem(submission) {
   const task = state.tasks.find((candidate) => candidate.id === submission.task_id);
+  const fileCount = submissionFilesFor(submission.id).length;
   return `
     <article class="queue-item ${submission.id === selectedSubmissionId ? "selected" : ""}" data-submission-id="${escapeHtml(submission.id)}">
       <div class="queue-topline">
@@ -621,6 +668,7 @@ function queueItem(submission) {
         ${statusPill(submission.status)}
       </div>
       <p>${escapeHtml(submission.artifact)}</p>
+      ${fileCount ? `<span class="tag">${fileCount} file${fileCount === 1 ? "" : "s"} attached</span>` : ""}
     </article>
   `;
 }
@@ -657,6 +705,7 @@ function peerSubmissionList(peerSubmissions, selectedId) {
               <span class="tag">Score ${scoreLabel(peer.score)}</span>
               ${review ? `<span class="tag">Confidence ${review.reviewer_confidence}/5</span>` : `<span class="tag">Awaiting review</span>`}
             </div>
+            ${submissionFileLinks(peer.id)}
           </div>
         `;
       }).join("")}
@@ -709,6 +758,7 @@ function reviewerView() {
               </div>
               <div class="artifact-block">${escapeHtml(submission.artifact)}</div>
               <div class="artifact-block">${escapeHtml(submission.notes || "No reviewer notes.")}</div>
+              ${submissionFileLinks(submission.id)}
               ${peerSubmissionList(peerSubmissions, submission.id)}
               <form class="review-form" data-submission-id="${escapeHtml(submission.id)}">
                 <div class="field-grid">
@@ -816,6 +866,7 @@ function adminView() {
                     <div><span>Avg score</span><strong>${scoreLabel(packet.average_score)}</strong></div>
                     <div><span>Confidence</span><strong>${scoreLabel(packet.average_reviewer_confidence)}</strong></div>
                   </div>
+                  ${deliveryFileLinks(packet)}
                 </article>
               `;
             }).join("")}
@@ -856,6 +907,7 @@ function adminView() {
               <tr><td>customer_orgs</td><td>Vetted buyer and sponsor organizations</td><td>${state.customer_orgs.length}</td></tr>
               <tr><td>tasks</td><td>Red-team, eval, cataloging, monitoring work units</td><td>${state.tasks.length}</td></tr>
               <tr><td>submissions</td><td>Contributor artifacts awaiting QC</td><td>${state.submissions.length}</td></tr>
+              <tr><td>submission_files</td><td>Uploaded artifact binaries and checksums</td><td>${state.submission_files.length}</td></tr>
               <tr><td>reviews</td><td>Verdicts, confidence, scoring notes</td><td>${state.reviews.length}</td></tr>
               <tr><td>delivery_packets</td><td>Customer-ready approved work bundles</td><td>${packets.length}</td></tr>
               <tr><td>payouts</td><td>Stripe transfer-ready approved work</td><td>${state.payouts.length}</td></tr>
@@ -990,10 +1042,7 @@ function bindEvents() {
       try {
         const result = await api(`/api/tasks/${form.dataset.taskId}/submissions`, {
           method: "POST",
-          body: JSON.stringify({
-            artifact: formData.get("artifact"),
-            notes: formData.get("notes")
-          })
+          body: formData
         });
         state = result.state;
         showToast("Submission sent to review.");
