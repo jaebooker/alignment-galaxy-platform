@@ -117,8 +117,23 @@ function currentUserId() {
   return currentSession()?.user_id || null;
 }
 
-function demoUserForRole(role) {
-  return state?.demo_users?.[role] || null;
+function currentAuth() {
+  return state?.auth || { enabled: false, provider: "OAuth", login_url: "/auth/login", logout_url: "/api/session/logout" };
+}
+
+function currentPath() {
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+function authLoginUrl(role = activeRole) {
+  const url = new URL(currentAuth().login_url || "/auth/login", window.location.origin);
+  url.searchParams.set("role", role);
+  url.searchParams.set("return_to", currentPath());
+  return url.toString();
+}
+
+function userCanUseRole(role) {
+  return currentUser()?.roles?.includes(role) || false;
 }
 
 function customerOrgsForSession() {
@@ -153,13 +168,21 @@ async function api(route, options = {}) {
   return data;
 }
 
-async function loginAsRole(role) {
-  const demoUser = demoUserForRole(role);
-  if (!demoUser) throw new Error(`No demo user is available for ${role}.`);
-  const result = await api("/api/session", {
+function beginSignIn(role = activeRole) {
+  if (!currentAuth().enabled) {
+    throw new Error(`Configure ${currentAuth().provider || "OAuth"} before signing in.`);
+  }
+  window.location.href = authLoginUrl(role);
+}
+
+async function switchRole(role) {
+  if (!currentSession()) {
+    beginSignIn(role);
+    return null;
+  }
+  const result = await api("/api/session/role", {
     method: "POST",
     body: JSON.stringify({
-      user_id: demoUser.user_id,
       role
     })
   });
@@ -167,6 +190,17 @@ async function loginAsRole(role) {
   activeRole = state.session.active_role;
   selectedTaskId = state.tasks[0]?.id || null;
   selectedSubmissionId = state.submissions.find((submission) => submission.status === "submitted")?.id || null;
+  return state;
+}
+
+async function logout() {
+  const result = await api(currentAuth().logout_url || "/api/session/logout", {
+    method: "POST",
+    body: "{}"
+  });
+  state = result.state || { ...state, session: null };
+  selectedTaskId = null;
+  selectedSubmissionId = null;
   return state;
 }
 
@@ -179,9 +213,7 @@ function showToast(message) {
 
 async function refresh(message) {
   state = await api("/api/bootstrap");
-  if (!state.session) {
-    await loginAsRole(activeRole);
-  } else {
+  if (state.session) {
     activeRole = state.session.active_role;
   }
   if (message) showToast(message);
@@ -190,6 +222,7 @@ async function refresh(message) {
 
 function header() {
   const session = currentSession();
+  const auth = currentAuth();
   return `
     <header class="topbar">
       <div class="brand">
@@ -203,7 +236,7 @@ function header() {
       </div>
       <nav class="segmented" aria-label="Role">
         ${Object.entries(roleLabels).map(([role, label]) => `
-          <button data-role="${role}" aria-pressed="${role === activeRole}" title="Sign in as ${escapeHtml(demoUserForRole(role)?.name || label)}">${label}</button>
+          <button data-role="${role}" aria-pressed="${role === activeRole}" title="${session ? `Switch to ${escapeHtml(label)}` : `Sign in with ${escapeHtml(auth.provider)} as ${escapeHtml(label)}`}" ${session && !userCanUseRole(role) ? "disabled" : ""}>${label}</button>
         `).join("")}
       </nav>
       <div class="topbar-actions">
@@ -212,8 +245,11 @@ function header() {
             <span>${escapeHtml(roleLabels[session.active_role] || session.active_role)}</span>
             <strong>${escapeHtml(session.user.name)}</strong>
           </div>
-        ` : ""}
-        <button class="btn" data-action="reset" title="Reset demo data">Reset</button>
+          <button class="btn" data-action="logout" title="Sign out">Sign out</button>
+          ${session.active_role === "admin" ? `<button class="btn" data-action="reset" title="Reset demo data">Reset</button>` : ""}
+        ` : `
+          <button class="btn primary" data-action="sign-in" title="Sign in with ${escapeHtml(auth.provider)}">Sign in</button>
+        `}
       </div>
     </header>
   `;
@@ -831,7 +867,37 @@ function adminView() {
   `;
 }
 
+function signedOutView() {
+  const auth = currentAuth();
+  return `
+    <section>
+      <div class="view-header">
+        <div>
+          <h1>Sign in to Alignment Galaxy</h1>
+          <p>${auth.enabled ? `${escapeHtml(auth.provider)} is connected for OAuth sign-in.` : `${escapeHtml(auth.provider || "OAuth")} is not configured on this server.`}</p>
+        </div>
+      </div>
+      ${quickStats()}
+      <section class="form-panel">
+        <div class="panel-header">
+          <h2>Choose workspace</h2>
+          <span class="status-pill ${auth.enabled ? "ready" : "pending"}">${auth.enabled ? "OAuth ready" : "Setup needed"}</span>
+        </div>
+        <div class="network-map">
+          ${Object.entries(roleLabels).map(([role, label]) => `
+            <button class="network-step auth-role" data-role="${role}" type="button" ${auth.enabled ? "" : "disabled"}>
+              <strong>${escapeHtml(label)}</strong>
+              <span>${auth.enabled ? `Continue with ${escapeHtml(auth.provider)}` : "Configure OAuth environment variables"}</span>
+            </button>
+          `).join("")}
+        </div>
+      </section>
+    </section>
+  `;
+}
+
 function mainView() {
+  if (!currentSession()) return signedOutView();
   if (activeRole === "customer") return customerView();
   if (activeRole === "reviewer") return reviewerView();
   if (activeRole === "admin") return adminView();
@@ -855,8 +921,31 @@ function bindEvents() {
   document.querySelectorAll("[data-role]").forEach((button) => {
     button.addEventListener("click", async () => {
       try {
-        await loginAsRole(button.dataset.role);
-        showToast(`Signed in as ${currentUser().name}.`);
+        const nextState = await switchRole(button.dataset.role);
+        if (!nextState) return;
+        showToast(`Viewing ${roleLabels[activeRole]}.`);
+        render();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-action='sign-in']").forEach((button) => {
+    button.addEventListener("click", () => {
+      try {
+        beginSignIn(activeRole);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-action='logout']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await logout();
+        showToast("Signed out.");
         render();
       } catch (error) {
         showToast(error.message);
@@ -1010,11 +1099,14 @@ function bindEvents() {
 
   document.querySelectorAll("[data-action='reset']").forEach((button) => {
     button.addEventListener("click", async () => {
-      const result = await api("/api/reset", { method: "POST", body: "{}" });
-      state = result;
-      await loginAsRole(activeRole);
-      showToast("Demo data reset.");
-      render();
+      try {
+        const result = await api("/api/reset", { method: "POST", body: "{}" });
+        state = result;
+        showToast("Demo data reset.");
+        render();
+      } catch (error) {
+        showToast(error.message);
+      }
     });
   });
 }

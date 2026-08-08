@@ -161,6 +161,11 @@ textarea {
   box-shadow: 0 5px 14px rgba(23, 33, 29, 0.08);
 }
 
+.segmented button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -753,6 +758,17 @@ th {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.35;
+}
+
+.network-step.auth-role {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.network-step.auth-role:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
 .capacity-bar {

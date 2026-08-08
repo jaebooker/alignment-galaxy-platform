@@ -2,6 +2,7 @@ const http = require("node:http");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { readFile } = require("node:fs/promises");
+const { createOAuthClient } = require("./lib/oauth");
 const { createPostgresStore, hashSessionToken } = require("./lib/postgresStore");
 
 const ROOT = __dirname;
@@ -40,6 +41,7 @@ const store = createPostgresStore({
   normalizeState,
   now
 });
+const auth = createOAuthClient({ now: () => new Date() });
 
 async function loadState() {
   return store.read();
@@ -59,6 +61,7 @@ async function closeStateStore() {
 
 function normalizeState(state) {
   state.sessions ||= [];
+  state.auth_identities ||= [];
   state.delivery_packets ||= [];
   state.review_standards ||= DEFAULT_REVIEW_STANDARDS;
   state.tasks ||= [];
@@ -85,6 +88,14 @@ function sendJson(res, statusCode, payload, headers = {}) {
 
 function sendError(res, statusCode, message, details = undefined) {
   sendJson(res, statusCode, { error: message, details });
+}
+
+function sendRedirect(res, location, headers = {}) {
+  res.writeHead(303, {
+    location,
+    ...headers
+  });
+  res.end();
 }
 
 function httpError(statusCode, message) {
@@ -159,17 +170,91 @@ function requireSession(state, req, allowedRoles = []) {
   return context;
 }
 
-function demoUsersByRole(state) {
-  return ["contributor", "customer", "reviewer", "admin"].reduce((users, role) => {
-    const user = state.users.find((candidate) => candidate.roles.includes(role) && candidate.verification_status === "verified");
-    if (user) {
-      users[role] = {
-        user_id: user.id,
-        name: user.name
-      };
-    }
-    return users;
-  }, {});
+function createSessionForUser(state, user, role) {
+  if (!user.verification_status || user.verification_status !== "verified") {
+    throw httpError(403, "User must be verified before signing in.");
+  }
+  if (!user.roles.includes(role)) {
+    throw httpError(403, "User does not have that role.");
+  }
+
+  const token = randomUUID();
+  const session = {
+    id: createId("sess"),
+    token_hash: hashSessionToken(token),
+    user_id: user.id,
+    active_role: role,
+    created_at: now(),
+    expires_at: new Date(Date.now() + SESSION_DURATION_MS).toISOString()
+  };
+
+  state.sessions = state.sessions.filter((candidate) => Date.parse(candidate.expires_at) > Date.now());
+  state.sessions.unshift(session);
+  return { session, token };
+}
+
+function resolveActiveRole(user, requestedRole) {
+  if (requestedRole && user.roles.includes(requestedRole)) return requestedRole;
+  return user.roles[0] || "contributor";
+}
+
+function findOrCreateOAuthUser(state, profile) {
+  if (!profile.email) {
+    throw httpError(403, "OAuth profile must include an email address.");
+  }
+
+  const email = profile.email.trim().toLowerCase();
+  const identity = state.auth_identities.find((candidate) => {
+    return candidate.provider === profile.provider && candidate.subject === profile.subject;
+  });
+  let user = identity ? getUser(state, identity.user_id) : null;
+
+  if (!user && profile.email_verified !== false) {
+    user = state.users.find((candidate) => candidate.email.toLowerCase() === email);
+  }
+  if (!user && profile.email_verified === false) {
+    throw httpError(403, "OAuth email must be verified before account creation.");
+  }
+
+  if (!user) {
+    user = {
+      id: createId("user"),
+      name: String(profile.name || email).trim(),
+      email,
+      roles: ["contributor"],
+      verification_status: "verified",
+      created_at: now()
+    };
+    state.users.push(user);
+    state.contributor_profiles.push({
+      user_id: user.id,
+      skills: [],
+      verification_tier: 0,
+      reputation_score: 0,
+      approval_rate: 0,
+      completed_tasks: 0,
+      payout_status: "not_started",
+      stripe_connect_account_id: null
+    });
+    addActivity(state, "user_created", `${user.name} joined through ${auth.publicConfig().provider}.`);
+  }
+
+  if (identity) {
+    identity.email = email;
+    identity.user_id = user.id;
+    identity.last_seen_at = now();
+  } else {
+    state.auth_identities.push({
+      provider: profile.provider,
+      subject: profile.subject,
+      user_id: user.id,
+      email,
+      created_at: now(),
+      last_seen_at: now()
+    });
+  }
+
+  return user;
 }
 
 async function readBody(req) {
@@ -243,12 +328,12 @@ function computeMetrics(state) {
 }
 
 function clientState(state, context = {}) {
-  const { sessions, ...publicState } = state;
+  const { auth_identities: _authIdentities, sessions: _sessions, ...publicState } = state;
   const session = context.session || (context.req ? currentSessionContext(state, context.req)?.session : null);
 
   return {
     ...publicState,
-    demo_users: demoUsersByRole(state),
+    auth: auth.publicConfig(),
     session: sessionView(state, session),
     metrics: computeMetrics(state)
   };
@@ -551,39 +636,62 @@ async function submitScreening(req, res, state) {
   sendJson(res, 201, { profile, state: clientState(state, { session }) });
 }
 
-async function createSession(req, res, state) {
+async function beginOAuthLogin(req, res, url) {
+  const redirect = await auth.authorizationRedirect(req, url);
+  sendRedirect(res, redirect.location, {
+    "set-cookie": redirect.cookie
+  });
+}
+
+async function completeOAuthLogin(req, res, url) {
+  const result = await auth.callbackResult(req, url);
+  const state = await loadState();
+  const user = findOrCreateOAuthUser(state, result.profile);
+  const activeRole = resolveActiveRole(user, result.requestedRole);
+  const { session, token } = createSessionForUser(state, user, activeRole);
+  addActivity(state, "session_created", `${user.name} signed in with ${auth.publicConfig().provider}.`);
+  await saveState(state);
+  sendRedirect(res, result.returnTo || "/", {
+    "set-cookie": [sessionCookie(token), result.clearCookie]
+  });
+}
+
+async function switchSessionRole(req, res, state) {
+  const { session, user } = requireSession(state, req);
+  const body = await readBody(req);
+  requireFields(body, ["role"]);
+  if (!user.roles.includes(body.role)) {
+    return sendError(res, 403, "User does not have that role.");
+  }
+  session.active_role = body.role;
+  await saveState(state);
+  sendJson(res, 200, { session: sessionView(state, session), state: clientState(state, { session }) });
+}
+
+async function createTestSession(req, res, state) {
+  if (!testAuthEnabled()) return sendError(res, 404, "API route not found.");
   const body = await readBody(req);
   requireFields(body, ["user_id", "role"]);
 
   const user = getUser(state, body.user_id);
   if (!user) return sendError(res, 404, "User not found.");
-  if (user.verification_status !== "verified") return sendError(res, 403, "User must be verified before signing in.");
-  if (!user.roles.includes(body.role)) return sendError(res, 403, "User does not have that role.");
-
-  const token = randomUUID();
-  const session = {
-    id: createId("sess"),
-    token_hash: hashSessionToken(token),
-    user_id: user.id,
-    active_role: body.role,
-    created_at: now(),
-    expires_at: new Date(Date.now() + SESSION_DURATION_MS).toISOString()
-  };
-
-  state.sessions = state.sessions.filter((candidate) => Date.parse(candidate.expires_at) > Date.now());
-  state.sessions.unshift(session);
-  addActivity(state, "session_created", `${user.name} signed in as ${body.role}.`);
+  const { session, token } = createSessionForUser(state, user, body.role);
+  addActivity(state, "session_created", `${user.name} signed in through test auth.`);
   await saveState(state);
   sendJson(res, 201, { session: sessionView(state, session), state: clientState(state, { session }) }, {
     "set-cookie": sessionCookie(token)
   });
 }
 
+function testAuthEnabled() {
+  return process.env.NODE_ENV === "test" || process.env.ALLOW_TEST_AUTH === "true";
+}
+
 async function getSession(req, res, state) {
   const context = currentSessionContext(state, req);
   sendJson(res, 200, {
-    session: context ? sessionView(state, context.session) : null,
-    demo_users: demoUsersByRole(state)
+    auth: auth.publicConfig(),
+    session: context ? sessionView(state, context.session) : null
   });
 }
 
@@ -612,7 +720,15 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/session") {
-    return createSession(req, res, state);
+    return sendError(res, 410, "Demo session creation has been replaced by OAuth sign-in.");
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/session/role") {
+    return switchSessionRole(req, res, state);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/test/session") {
+    return createTestSession(req, res, state);
   }
 
   if (req.method === "POST" && url.pathname === "/api/session/logout") {
@@ -620,6 +736,9 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/reset") {
+    if (!testAuthEnabled() && process.env.ALLOW_DATA_RESET !== "true") {
+      requireSession(state, req, ["admin"]);
+    }
     const reset = await resetState();
     return sendJson(res, 200, clientState(reset), {
       "set-cookie": clearSessionCookie()
@@ -653,6 +772,18 @@ async function handleApi(req, res, url) {
   sendError(res, 404, "API route not found.");
 }
 
+async function handleAuth(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/auth/login") {
+    return beginOAuthLogin(req, res, url);
+  }
+
+  if (req.method === "GET" && url.pathname === "/auth/callback") {
+    return completeOAuthLogin(req, res, url);
+  }
+
+  sendError(res, 404, "Auth route not found.");
+}
+
 async function serveStatic(req, res, url) {
   const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname;
   const normalizedPath = path.normalize(decodeURIComponent(requestedPath)).replace(/^(\.\.[/\\])+/, "");
@@ -683,6 +814,8 @@ function createAppServer() {
     try {
       if (url.pathname.startsWith("/api/")) {
         await handleApi(req, res, url);
+      } else if (url.pathname.startsWith("/auth/")) {
+        await handleAuth(req, res, url);
       } else {
         await serveStatic(req, res, url);
       }

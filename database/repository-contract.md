@@ -17,6 +17,7 @@ The MVP uses `lib/postgresStore.js` as the persistence adapter. It keeps the sam
 - `write(state)` persists one complete state snapshot into relational tables.
 - `reset()` restores seed data for local demos only.
 - `transaction(mutator)` loads state, lets domain services mutate it, then commits the result inside a SQL transaction.
+- `auth_identities` links OAuth provider subjects to local platform users, keeping local role and verification checks authoritative.
 
 ## Migration Notes
 

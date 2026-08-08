@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
 if (databaseUrl) process.env.DATABASE_URL = databaseUrl;
+process.env.ALLOW_TEST_AUTH = "true";
 
 const { closeStateStore, createAppServer } = require("../server");
 
@@ -56,7 +57,7 @@ function createClient(baseUrl) {
 
   return {
     login(userId, role) {
-      return clientRequest("/api/session", {
+      return clientRequest("/api/test/session", {
         method: "POST",
         body: JSON.stringify({ user_id: userId, role })
       });
@@ -83,9 +84,13 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     const mayaUser = initial.users.find((candidate) => candidate.name === "Maya Chen");
     const renUser = initial.users.find((candidate) => candidate.name === "Ren Okafor");
     const customerUser = initial.users.find((candidate) => candidate.name === "Elara Singh");
+    const reviewerUser = initial.users.find((candidate) => candidate.name === "Sam Rivera");
+    const adminUser = initial.users.find((candidate) => candidate.name === "Jaeson Booker");
     assert.ok(mayaUser);
     assert.ok(renUser);
     assert.ok(customerUser);
+    assert.ok(reviewerUser);
+    assert.ok(adminUser);
 
     await assert.rejects(
       () => request(baseUrl, `/api/tasks/${task.id}/claim`, {
@@ -137,7 +142,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     });
     assert.equal(secondSubmissionResponse.submission.status, "submitted");
 
-    await reviewer.login(initial.demo_users.reviewer.user_id, "reviewer");
+    await reviewer.login(reviewerUser.id, "reviewer");
     const reviewResponse = await reviewer.request(`/api/submissions/${submissionResponse.submission.id}/reviews`, {
       method: "POST",
       body: JSON.stringify({
@@ -153,7 +158,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     assert.equal(reviewResponse.state.payouts[0].amount_cents, 21000);
     assert.equal(reviewResponse.state.delivery_packets[0].status, "assembling");
     assert.ok(reviewResponse.state.activity[0].message.includes("approved"));
-    assert.equal(reviewResponse.review.reviewer_id, initial.demo_users.reviewer.user_id);
+    assert.equal(reviewResponse.review.reviewer_id, reviewerUser.id);
     assert.equal(reviewResponse.state.sessions, undefined);
 
     const secondReviewResponse = await reviewer.request(`/api/submissions/${secondSubmissionResponse.submission.id}/reviews`, {
@@ -182,7 +187,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
       (error) => error.statusCode === 403 && error.message.includes("own organization")
     );
 
-    await admin.login(initial.demo_users.admin.user_id, "admin");
+    await admin.login(adminUser.id, "admin");
     const assembled = await admin.request(`/api/tasks/${task.id}/delivery-packet`, {
       method: "POST",
       body: "{}"

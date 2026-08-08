@@ -24,6 +24,16 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS auth_identities (
+  provider TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, subject)
+);
+
 CREATE TABLE IF NOT EXISTS contributor_profiles (
   user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   skills TEXT[] NOT NULL DEFAULT '{}',
@@ -167,4 +177,5 @@ CREATE INDEX IF NOT EXISTS idx_payouts_status ON payouts(status);
 CREATE INDEX IF NOT EXISTS idx_delivery_packets_status ON delivery_packets(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_auth_identities_user ON auth_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_activity_events_created ON activity_events(created_at);

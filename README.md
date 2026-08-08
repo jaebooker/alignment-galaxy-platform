@@ -17,6 +17,16 @@ The app uses Postgres for persistence. On first launch, `lib/postgresStore.js` r
 For SSL-required hosted Postgres providers, include `sslmode=require` in `DATABASE_URL` or set `PGSSLMODE=require`.
 `.env.example` documents the expected environment variables for hosts that load env files.
 
+## OAuth Setup
+
+The app supports generic OIDC, Auth0, or Clerk through the same callback route:
+
+```text
+http://localhost:3000/auth/callback
+```
+
+Set `AUTH_SESSION_SECRET`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, and optionally `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URI`. Auth0 aliases such as `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET` are also accepted. Clerk aliases such as `CLERK_ISSUER_URL`, `CLERK_CLIENT_ID`, and `CLERK_CLIENT_SECRET` are accepted too.
+
 ## Useful Commands
 
 ```bash
@@ -28,7 +38,7 @@ npm test
 
 ## Implemented Flows
 
-- Cookie-backed demo sessions: role switches create real server sessions, and protected API routes use the session actor instead of trusting browser-supplied user IDs.
+- OAuth-backed sessions: Auth0, Clerk, or generic OIDC sign-in links external identities to platform users, hashes session tokens, and keeps role checks server-side.
 - Contributor marketplace: browse open tasks, claim gated tasks, submit artifacts, complete a screening task.
 - Customer workspace: create new commercial or public-good tasks and monitor engagement status.
 - Reviewer queue: inspect submitted work, score it, approve or reject it.
@@ -40,7 +50,6 @@ npm test
 
 ## Next Build Steps
 
-- Replace demo session creation with Clerk/Auth0 OAuth and keep the same server-side role checks.
 - Connect Stripe Connect for contributor onboarding and transfers.
 - Add file storage for uploaded submission artifacts.
 - Turn delivery packets into exported reports with customer approval and payout release controls.
