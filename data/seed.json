@@ -1,0 +1,196 @@
+{
+  "users": [
+    {
+      "id": "u_contrib_maya",
+      "name": "Maya Chen",
+      "email": "maya@example.com",
+      "roles": ["contributor"],
+      "verification_status": "verified",
+      "created_at": "2026-08-07T12:00:00.000Z"
+    },
+    {
+      "id": "u_contrib_ren",
+      "name": "Ren Okafor",
+      "email": "ren@example.com",
+      "roles": ["contributor"],
+      "verification_status": "verified",
+      "created_at": "2026-08-07T12:00:00.000Z"
+    },
+    {
+      "id": "u_customer_elara",
+      "name": "Elara Singh",
+      "email": "elara@example.com",
+      "roles": ["customer"],
+      "verification_status": "verified",
+      "created_at": "2026-08-07T12:00:00.000Z"
+    },
+    {
+      "id": "u_reviewer_sam",
+      "name": "Sam Rivera",
+      "email": "sam@example.com",
+      "roles": ["reviewer"],
+      "verification_status": "verified",
+      "created_at": "2026-08-07T12:00:00.000Z"
+    },
+    {
+      "id": "u_admin_jaeson",
+      "name": "Jaeson Booker",
+      "email": "jaeson@example.com",
+      "roles": ["admin", "reviewer"],
+      "verification_status": "verified",
+      "created_at": "2026-08-07T12:00:00.000Z"
+    }
+  ],
+  "contributor_profiles": [
+    {
+      "user_id": "u_contrib_maya",
+      "skills": ["red teaming", "eval design", "Python", "LLM behavior analysis"],
+      "verification_tier": 2,
+      "reputation_score": 82,
+      "approval_rate": 0.91,
+      "completed_tasks": 8,
+      "payout_status": "stripe_ready",
+      "stripe_connect_account_id": "acct_demo_maya"
+    },
+    {
+      "user_id": "u_contrib_ren",
+      "skills": ["policy analysis", "behavior cataloging", "technical writing"],
+      "verification_tier": 1,
+      "reputation_score": 64,
+      "approval_rate": 0.78,
+      "completed_tasks": 3,
+      "payout_status": "needs_id_verification",
+      "stripe_connect_account_id": null
+    }
+  ],
+  "customer_orgs": [
+    {
+      "id": "org_apollo_demo",
+      "name": "Apollo-style Eval Org",
+      "type": "evaluation_org",
+      "vetting_status": "approved",
+      "billing_status": "manual_invoice",
+      "contact_user_id": "u_customer_elara"
+    },
+    {
+      "id": "org_public_sponsor",
+      "name": "Public-Good Sponsor Pool",
+      "type": "public_good_sponsor",
+      "vetting_status": "approved",
+      "billing_status": "grant_funded",
+      "contact_user_id": "u_admin_jaeson"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t_rt_bio_agent",
+      "title": "Red-team autonomous biosecurity planning refusals",
+      "description": "Find prompts where an agentic model drifts from safe high-level refusal into actionable operational planning. Submit prompt, model response, risk notes, and suggested eval rubric.",
+      "task_type": "red_team",
+      "reward_cents": 45000,
+      "required_skill_tier": 2,
+      "redundancy_count": 3,
+      "deadline": "2026-09-04",
+      "status": "open",
+      "sponsoring_org_id": "org_apollo_demo",
+      "commerciality": "commercial",
+      "skill_tags": ["red teaming", "biosecurity", "agent behavior"],
+      "deliverable_format": "prompt-response bundle",
+      "risk_level": "sensitive",
+      "acceptance_criteria": [
+        "Includes prompt, response, model or environment notes, and risk rationale.",
+        "Avoids adding operational biosecurity detail beyond the observed model behavior.",
+        "Suggests a concrete grading rubric or follow-up eval."
+      ],
+      "claimed_by": [],
+      "created_at": "2026-08-07T12:00:00.000Z"
+    },
+    {
+      "id": "t_eval_planning",
+      "title": "Generate eval cases for deceptive planning",
+      "description": "Create short scenario-based eval items that probe hidden goal pursuit, sandbagging, and situational awareness. Include expected unsafe signals and grading notes.",
+      "task_type": "eval_generation",
+      "reward_cents": 30000,
+      "required_skill_tier": 1,
+      "redundancy_count": 2,
+      "deadline": "2026-08-28",
+      "status": "open",
+      "sponsoring_org_id": "org_public_sponsor",
+      "commerciality": "public_good",
+      "skill_tags": ["eval design", "agent foundations", "writing"],
+      "deliverable_format": "eval item set",
+      "risk_level": "standard",
+      "acceptance_criteria": [
+        "Provides scenario text, unsafe signal, and grading notes for each item.",
+        "Calls out one false positive and one false negative risk.",
+        "Separates intended behavior from speculative interpretation."
+      ],
+      "claimed_by": [],
+      "created_at": "2026-08-07T12:00:00.000Z"
+    },
+    {
+      "id": "t_catalog_fable",
+      "title": "Catalog model behavior in long-horizon tool use",
+      "description": "Run structured behavior observations on a tool-using model across repeated planning tasks. Tag failures, recovery behavior, and potential monitoring hooks.",
+      "task_type": "behavior_catalog",
+      "reward_cents": 22000,
+      "required_skill_tier": 1,
+      "redundancy_count": 2,
+      "deadline": "2026-08-21",
+      "status": "in_review",
+      "sponsoring_org_id": "org_apollo_demo",
+      "commerciality": "commercial",
+      "skill_tags": ["behavior cataloging", "tool use", "monitoring"],
+      "deliverable_format": "observation matrix",
+      "risk_level": "standard",
+      "acceptance_criteria": [
+        "Tags each behavior observation with trace context and failure mode.",
+        "Identifies monitoring hooks that could be validated by a reviewer.",
+        "Distinguishes repeated patterns from one-off anomalies."
+      ],
+      "claimed_by": ["u_contrib_ren"],
+      "created_at": "2026-08-07T12:00:00.000Z"
+    }
+  ],
+  "submissions": [
+    {
+      "id": "sub_catalog_ren",
+      "task_id": "t_catalog_fable",
+      "contributor_id": "u_contrib_ren",
+      "artifact": "Observation matrix with 14 tool-use traces, tagged failure modes, and three monitoring hooks for recovery loops.",
+      "notes": "The strongest signal was repeated self-correction after hidden state mismatch. I included trace IDs and reviewer flags.",
+      "status": "submitted",
+      "review_outcome": null,
+      "score": null,
+      "created_at": "2026-08-07T13:30:00.000Z"
+    }
+  ],
+  "reviews": [],
+  "delivery_packets": [],
+  "payouts": [],
+  "screening_tasks": [
+    {
+      "id": "screening_basic_eval",
+      "title": "Basic eval critique",
+      "prompt": "Given a proposed eval, identify one false positive risk, one false negative risk, and one improvement.",
+      "required_for_tier": 1,
+      "status": "active"
+    }
+  ],
+  "review_standards": [
+    "The artifact directly answers the task prompt and includes enough context for a customer to validate it.",
+    "Safety-sensitive content is summarized at the right level of abstraction and does not add unnecessary operational detail.",
+    "Claims are specific, reproducible, and separated from speculation.",
+    "Reviewer notes identify false positive risks, false negative risks, and any recommended follow-up."
+  ],
+  "sessions": [],
+  "activity": [
+    {
+      "id": "act_seed_review",
+      "kind": "submission_created",
+      "message": "Ren submitted behavior cataloging work for review.",
+      "created_at": "2026-08-07T13:30:00.000Z"
+    }
+  ],
+  "updated_at": "2026-08-07T13:30:00.000Z"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "alignment-galaxy-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Alignment Galaxy MVP platform scaffold for distributed AI safety tasks.",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
