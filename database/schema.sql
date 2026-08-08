@@ -1,4 +1,6 @@
-CREATE TABLE users (
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE,
@@ -7,13 +9,13 @@ CREATE TABLE users (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE user_roles (
+CREATE TABLE IF NOT EXISTS user_roles (
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   role TEXT NOT NULL CHECK (role IN ('contributor', 'customer', 'reviewer', 'admin')),
   PRIMARY KEY (user_id, role)
 );
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_token_hash TEXT NOT NULL UNIQUE,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -22,7 +24,7 @@ CREATE TABLE sessions (
   expires_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE contributor_profiles (
+CREATE TABLE IF NOT EXISTS contributor_profiles (
   user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   skills TEXT[] NOT NULL DEFAULT '{}',
   verification_tier INTEGER NOT NULL DEFAULT 0,
@@ -34,7 +36,7 @@ CREATE TABLE contributor_profiles (
   stripe_connect_account_id TEXT
 );
 
-CREATE TABLE customer_orgs (
+CREATE TABLE IF NOT EXISTS customer_orgs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   type TEXT NOT NULL CHECK (type IN ('frontier_lab', 'enterprise', 'evaluation_org', 'governance_org', 'public_good_sponsor')),
@@ -44,7 +46,7 @@ CREATE TABLE customer_orgs (
   contact_user_id UUID REFERENCES users(id)
 );
 
-CREATE TABLE tasks (
+CREATE TABLE IF NOT EXISTS tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
   description TEXT NOT NULL,
@@ -66,14 +68,14 @@ CREATE TABLE tasks (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE task_claims (
+CREATE TABLE IF NOT EXISTS task_claims (
   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   contributor_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (task_id, contributor_id)
 );
 
-CREATE TABLE submissions (
+CREATE TABLE IF NOT EXISTS submissions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   contributor_id UUID NOT NULL REFERENCES users(id),
@@ -86,7 +88,7 @@ CREATE TABLE submissions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE reviews (
+CREATE TABLE IF NOT EXISTS reviews (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
   reviewer_id UUID NOT NULL REFERENCES users(id),
@@ -97,7 +99,7 @@ CREATE TABLE reviews (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE payouts (
+CREATE TABLE IF NOT EXISTS payouts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
   contributor_id UUID NOT NULL REFERENCES users(id),
@@ -109,7 +111,7 @@ CREATE TABLE payouts (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE review_standards (
+CREATE TABLE IF NOT EXISTS review_standards (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
   standard TEXT NOT NULL,
@@ -117,7 +119,29 @@ CREATE TABLE review_standards (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE delivery_packets (
+CREATE TABLE IF NOT EXISTS screening_tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  required_for_tier INTEGER NOT NULL DEFAULT 1 CHECK (required_for_tier > 0),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'retired')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS app_metadata (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS delivery_packets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id UUID NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'assembling'
@@ -135,11 +159,12 @@ CREATE TABLE delivery_packets (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_tasks_status ON tasks(status);
-CREATE INDEX idx_tasks_commerciality ON tasks(commerciality);
-CREATE INDEX idx_submissions_status ON submissions(status);
-CREATE INDEX idx_reviews_reviewer ON reviews(reviewer_id);
-CREATE INDEX idx_payouts_status ON payouts(status);
-CREATE INDEX idx_delivery_packets_status ON delivery_packets(status);
-CREATE INDEX idx_sessions_user ON sessions(user_id);
-CREATE INDEX idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_commerciality ON tasks(commerciality);
+CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);
+CREATE INDEX IF NOT EXISTS idx_reviews_reviewer ON reviews(reviewer_id);
+CREATE INDEX IF NOT EXISTS idx_payouts_status ON payouts(status);
+CREATE INDEX IF NOT EXISTS idx_delivery_packets_status ON delivery_packets(status);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_activity_events_created ON activity_events(created_at);

@@ -1,6 +1,6 @@
 # Repository Contract
 
-The MVP currently uses `lib/jsonStore.js` as a local adapter. A Postgres adapter should keep the same shape:
+The MVP uses `lib/postgresStore.js` as the persistence adapter. It keeps the same state-level shape the API handlers were built around:
 
 ```js
 {
@@ -14,12 +14,12 @@ The MVP currently uses `lib/jsonStore.js` as a local adapter. A Postgres adapter
 ## Adapter Expectations
 
 - `read()` returns the full normalized application state for the current tenant/demo workspace.
-- `write(state)` persists one complete state snapshot.
+- `write(state)` persists one complete state snapshot into relational tables.
 - `reset()` restores seed data for local demos only.
-- `transaction(mutator)` loads state, lets domain services mutate it, then commits the result atomically.
+- `transaction(mutator)` loads state, lets domain services mutate it, then commits the result inside a SQL transaction.
 
 ## Migration Notes
 
-- In production, `transaction(mutator)` should become explicit SQL transactions around repository methods rather than full-state snapshots.
-- `sessions.session_token_hash` should store a hash of the cookie token, not the raw token used by the local demo store.
+- In production, `transaction(mutator)` should become explicit SQL transactions around narrower repository methods rather than full-state snapshots.
+- `sessions.session_token_hash` stores a SHA-256 hash of the cookie token.
 - API handlers should continue to resolve the actor server-side from the session, then pass actor context into domain operations.

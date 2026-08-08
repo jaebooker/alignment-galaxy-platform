@@ -2,12 +2,12 @@ const http = require("node:http");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { readFile } = require("node:fs/promises");
-const { createJsonStore } = require("./lib/jsonStore");
+const { createPostgresStore, hashSessionToken } = require("./lib/postgresStore");
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
 const SEED_FILE = path.join(ROOT, "data", "seed.json");
-const DATA_FILE = process.env.ALIGNMENT_GALAXY_DATA || path.join(ROOT, "data", "alignment-galaxy.local.json");
+const SCHEMA_FILE = path.join(ROOT, "database", "schema.sql");
 const SESSION_COOKIE = "ag_session";
 const SESSION_DURATION_MS = 1000 * 60 * 60 * 12;
 
@@ -30,13 +30,13 @@ function now() {
   return new Date().toISOString();
 }
 
-function createId(prefix) {
-  return `${prefix}_${randomUUID().slice(0, 8)}`;
+function createId() {
+  return randomUUID();
 }
 
-const store = createJsonStore({
-  dataFile: DATA_FILE,
+const store = createPostgresStore({
   seedFile: SEED_FILE,
+  schemaFile: SCHEMA_FILE,
   normalizeState,
   now
 });
@@ -51,6 +51,10 @@ async function saveState(state) {
 
 async function resetState() {
   return store.reset();
+}
+
+async function closeStateStore() {
+  await store.close();
 }
 
 function normalizeState(state) {
@@ -124,7 +128,10 @@ function getSessionToken(req) {
 function currentSessionContext(state, req) {
   const token = getSessionToken(req);
   if (!token) return null;
-  const session = state.sessions.find((candidate) => candidate.token === token);
+  const tokenHash = hashSessionToken(token);
+  const session = state.sessions.find((candidate) => {
+    return candidate.token_hash === tokenHash || candidate.session_token_hash === tokenHash || candidate.token === token;
+  });
   if (!session || Date.parse(session.expires_at) <= Date.now()) return null;
   const user = getUser(state, session.user_id);
   if (!user) return null;
@@ -553,9 +560,10 @@ async function createSession(req, res, state) {
   if (user.verification_status !== "verified") return sendError(res, 403, "User must be verified before signing in.");
   if (!user.roles.includes(body.role)) return sendError(res, 403, "User does not have that role.");
 
+  const token = randomUUID();
   const session = {
     id: createId("sess"),
-    token: randomUUID(),
+    token_hash: hashSessionToken(token),
     user_id: user.id,
     active_role: body.role,
     created_at: now(),
@@ -567,7 +575,7 @@ async function createSession(req, res, state) {
   addActivity(state, "session_created", `${user.name} signed in as ${body.role}.`);
   await saveState(state);
   sendJson(res, 201, { session: sessionView(state, session), state: clientState(state, { session }) }, {
-    "set-cookie": sessionCookie(session.token)
+    "set-cookie": sessionCookie(token)
   });
 }
 
@@ -582,7 +590,8 @@ async function getSession(req, res, state) {
 async function logoutSession(req, res, state) {
   const token = getSessionToken(req);
   if (token) {
-    state.sessions = state.sessions.filter((session) => session.token !== token);
+    const tokenHash = hashSessionToken(token);
+    state.sessions = state.sessions.filter((session) => session.token_hash !== tokenHash && session.session_token_hash !== tokenHash && session.token !== token);
     await saveState(state);
   }
   sendJson(res, 200, { session: null, state: clientState(state) }, {
@@ -691,6 +700,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  closeStateStore,
   createAppServer,
   resetState,
   loadState

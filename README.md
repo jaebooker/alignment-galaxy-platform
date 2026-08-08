@@ -5,12 +5,26 @@ This is the first working MVP slice for Alignment Galaxy: a marketplace where ve
 ## Run Locally
 
 ```bash
-npm start
+npm install
+docker compose up -d db
+DATABASE_URL=postgres://alignment_galaxy:alignment_galaxy@localhost:5432/alignment_galaxy npm start
 ```
 
 Open `http://localhost:3000`.
 
-The app uses only built-in Node and browser APIs, so it can run without a dependency install. Data persists to `data/alignment-galaxy.local.json`, which is created from `data/seed.json` on first launch.
+The app uses Postgres for persistence. On first launch, `lib/postgresStore.js` runs `database/schema.sql` and seeds an empty database from `data/seed.json`.
+
+For SSL-required hosted Postgres providers, include `sslmode=require` in `DATABASE_URL` or set `PGSSLMODE=require`.
+`.env.example` documents the expected environment variables for hosts that load env files.
+
+## Useful Commands
+
+```bash
+npm start
+npm test
+```
+
+`npm test` runs the Postgres smoke test when `DATABASE_URL` or `TEST_DATABASE_URL` is present. Without a database URL, the integration test is skipped.
 
 ## Implemented Flows
 
@@ -21,12 +35,11 @@ The app uses only built-in Node and browser APIs, so it can run without a depend
 - Customer delivery packets: assemble approved submissions into buyer-facing packets with review summaries.
 - Admin operations: monitor public-good allocation, reputation, review backlog, delivery readiness, and pending payouts.
 - API foundation: task posting, claiming, submission, review, screening, reset, and bootstrap endpoints.
-- Database plan: `database/schema.sql` maps the MVP objects to a future Postgres schema.
-- Storage adapter: `lib/jsonStore.js` is the local repository boundary to replace with Neon/Supabase/Postgres later.
+- Database foundation: `database/schema.sql` maps the MVP objects to Postgres tables.
+- Storage adapter: `lib/postgresStore.js` reads and writes the app state through the relational schema.
 
 ## Next Build Steps
 
-- Replace `lib/jsonStore.js` with a Postgres adapter using the schema in `database/schema.sql`.
 - Replace demo session creation with Clerk/Auth0 OAuth and keep the same server-side role checks.
 - Connect Stripe Connect for contributor onboarding and transfers.
 - Add file storage for uploaded submission artifacts.

@@ -1,11 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const os = require("node:os");
-const path = require("node:path");
 
-process.env.ALIGNMENT_GALAXY_DATA = path.join(os.tmpdir(), `alignment-galaxy-test-${Date.now()}.json`);
+const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
+if (databaseUrl) process.env.DATABASE_URL = databaseUrl;
 
-const { createAppServer } = require("../server");
+const { closeStateStore, createAppServer } = require("../server");
 
 function startServer() {
   const server = createAppServer();
@@ -66,15 +65,27 @@ function createClient(baseUrl) {
   };
 }
 
-test("core marketplace loop claims, submits, reviews, and prepares delivery", async () => {
+test("core marketplace loop claims, submits, reviews, and prepares delivery", {
+  skip: databaseUrl ? false : "Set TEST_DATABASE_URL or DATABASE_URL to run the Postgres smoke test."
+}, async () => {
   const { server, baseUrl } = await startServer();
   try {
+    await request(baseUrl, "/api/reset", {
+      method: "POST",
+      body: "{}"
+    });
     const initial = await request(baseUrl, "/api/bootstrap");
     assert.equal(initial.metrics.open_tasks, 2);
     assert.equal(initial.metrics.in_review, 1);
 
-    const task = initial.tasks.find((candidate) => candidate.id === "t_eval_planning");
+    const task = initial.tasks.find((candidate) => candidate.title === "Generate eval cases for deceptive planning");
     assert.ok(task);
+    const mayaUser = initial.users.find((candidate) => candidate.name === "Maya Chen");
+    const renUser = initial.users.find((candidate) => candidate.name === "Ren Okafor");
+    const customerUser = initial.users.find((candidate) => candidate.name === "Elara Singh");
+    assert.ok(mayaUser);
+    assert.ok(renUser);
+    assert.ok(customerUser);
 
     await assert.rejects(
       () => request(baseUrl, `/api/tasks/${task.id}/claim`, {
@@ -90,15 +101,15 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", as
     const customer = createClient(baseUrl);
     const admin = createClient(baseUrl);
 
-    const login = await maya.login("u_contrib_maya", "contributor");
+    const login = await maya.login(mayaUser.id, "contributor");
     assert.equal(login.session.active_role, "contributor");
-    assert.equal(login.state.session.user_id, "u_contrib_maya");
+    assert.equal(login.state.session.user_id, mayaUser.id);
 
     const claim = await maya.request(`/api/tasks/${task.id}/claim`, {
       method: "POST",
       body: "{}"
     });
-    assert.equal(claim.task.claimed_by.includes("u_contrib_maya"), true);
+    assert.equal(claim.task.claimed_by.includes(mayaUser.id), true);
 
     const submissionResponse = await maya.request(`/api/tasks/${task.id}/submissions`, {
       method: "POST",
@@ -108,14 +119,14 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", as
       })
     });
     assert.equal(submissionResponse.submission.status, "submitted");
-    assert.equal(submissionResponse.submission.contributor_id, "u_contrib_maya");
+    assert.equal(submissionResponse.submission.contributor_id, mayaUser.id);
 
-    await ren.login("u_contrib_ren", "contributor");
+    await ren.login(renUser.id, "contributor");
     const secondClaim = await ren.request(`/api/tasks/${task.id}/claim`, {
       method: "POST",
       body: "{}"
     });
-    assert.equal(secondClaim.task.claimed_by.includes("u_contrib_ren"), true);
+    assert.equal(secondClaim.task.claimed_by.includes(renUser.id), true);
 
     const secondSubmissionResponse = await ren.request(`/api/tasks/${task.id}/submissions`, {
       method: "POST",
@@ -126,7 +137,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", as
     });
     assert.equal(secondSubmissionResponse.submission.status, "submitted");
 
-    await reviewer.login("u_reviewer_sam", "reviewer");
+    await reviewer.login(initial.demo_users.reviewer.user_id, "reviewer");
     const reviewResponse = await reviewer.request(`/api/submissions/${submissionResponse.submission.id}/reviews`, {
       method: "POST",
       body: JSON.stringify({
@@ -142,7 +153,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", as
     assert.equal(reviewResponse.state.payouts[0].amount_cents, 21000);
     assert.equal(reviewResponse.state.delivery_packets[0].status, "assembling");
     assert.ok(reviewResponse.state.activity[0].message.includes("approved"));
-    assert.equal(reviewResponse.review.reviewer_id, "u_reviewer_sam");
+    assert.equal(reviewResponse.review.reviewer_id, initial.demo_users.reviewer.user_id);
     assert.equal(reviewResponse.state.sessions, undefined);
 
     const secondReviewResponse = await reviewer.request(`/api/submissions/${secondSubmissionResponse.submission.id}/reviews`, {
@@ -162,7 +173,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", as
     assert.equal(secondReviewResponse.state.delivery_packets[0].approved_count, 2);
     assert.equal(secondReviewResponse.state.metrics.ready_deliveries, 1);
 
-    await customer.login("u_customer_elara", "customer");
+    await customer.login(customerUser.id, "customer");
     await assert.rejects(
       () => customer.request(`/api/tasks/${task.id}/delivery-packet`, {
         method: "POST",
@@ -171,7 +182,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", as
       (error) => error.statusCode === 403 && error.message.includes("own organization")
     );
 
-    await admin.login("u_admin_jaeson", "admin");
+    await admin.login(initial.demo_users.admin.user_id, "admin");
     const assembled = await admin.request(`/api/tasks/${task.id}/delivery-packet`, {
       method: "POST",
       body: "{}"
@@ -180,5 +191,6 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", as
     assert.ok(assembled.delivery_packet.customer_summary.includes("Redundancy target met"));
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    await closeStateStore();
   }
 });
