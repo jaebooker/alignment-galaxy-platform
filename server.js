@@ -67,7 +67,25 @@ function normalizeState(state) {
   state.auth_identities ||= [];
   state.delivery_packets ||= [];
   state.submission_files ||= [];
+  state.payouts ||= [];
   state.review_standards ||= DEFAULT_REVIEW_STANDARDS;
+  state.payouts.forEach((payout) => {
+    payout.released_at ||= null;
+    payout.released_by ||= null;
+    payout.release_note ||= null;
+  });
+  state.delivery_packets.forEach((packet) => {
+    packet.report_title ||= null;
+    packet.report_markdown ||= null;
+    packet.report_exported_at ||= null;
+    packet.report_exported_by ||= null;
+    packet.customer_approved_at ||= null;
+    packet.customer_approved_by ||= null;
+    packet.customer_approval_notes ||= null;
+    packet.payout_released_at ||= null;
+    packet.payout_released_by ||= null;
+    packet.payout_release_note ||= null;
+  });
   state.tasks ||= [];
   state.tasks.forEach((task) => {
     task.acceptance_criteria ||= [
@@ -162,6 +180,12 @@ function publicSubmissionFile(file) {
     created_at: file.created_at,
     download_url: `/api/submissions/${encodeURIComponent(file.submission_id)}/files/${encodeURIComponent(file.id)}`
   };
+}
+
+function publicDeliveryPacket(packet) {
+  if (!packet) return null;
+  const { report_markdown: _reportMarkdown, ...publicPacket } = packet;
+  return publicPacket;
 }
 
 function getSessionToken(req) {
@@ -380,6 +404,112 @@ function canAccessSubmission(state, context, submission) {
   return org?.contact_user_id === user.id;
 }
 
+function canAccessDeliveryPacket(state, context, packet) {
+  if (!context || !packet) return false;
+  const { session, user } = context;
+  if (session.active_role === "reviewer" || session.active_role === "admin") return true;
+  if (session.active_role !== "customer") return false;
+
+  const task = getTask(state, packet.task_id);
+  const org = state.customer_orgs.find((candidate) => candidate.id === task?.sponsoring_org_id);
+  return org?.contact_user_id === user.id;
+}
+
+function packetPayouts(state, packet) {
+  const approvedIds = new Set(packet.approved_submission_ids || []);
+  return state.payouts.filter((payout) => approvedIds.has(payout.submission_id));
+}
+
+function reportFileName(task, packet) {
+  const slug = String(task?.title || packet.id || "delivery-report")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 64) || "delivery-report";
+  return `${slug}-report.md`;
+}
+
+function markdownList(items) {
+  if (!items?.length) return "- None";
+  return items.map((item) => `- ${item}`).join("\n");
+}
+
+function buildDeliveryReport(state, task, packet) {
+  const approved = (packet.approved_submission_ids || [])
+    .map((submissionId) => state.submissions.find((submission) => submission.id === submissionId))
+    .filter(Boolean);
+  const payouts = packetPayouts(state, packet);
+  const payoutTotal = payouts.reduce((sum, payout) => sum + payout.amount_cents, 0);
+  const title = `${task.title} Delivery Report`;
+  const lines = [
+    `# ${title}`,
+    "",
+    `Exported: ${now()}`,
+    `Customer: ${state.customer_orgs.find((org) => org.id === task.sponsoring_org_id)?.name || "Unknown organization"}`,
+    `Task type: ${task.task_type.replaceAll("_", " ")}`,
+    `Risk level: ${task.risk_level}`,
+    "",
+    "## Customer Summary",
+    "",
+    packet.customer_summary,
+    "",
+    "## Acceptance Criteria",
+    "",
+    markdownList(task.acceptance_criteria || []),
+    "",
+    "## Approved Artifacts",
+    ""
+  ];
+
+  approved.forEach((submission, index) => {
+    const review = reviewForSubmission(state, submission.id);
+    const files = filesForSubmission(state, submission.id);
+    lines.push(
+      `### Artifact ${index + 1}: ${getUser(state, submission.contributor_id)?.name || "Contributor"}`,
+      "",
+      submission.artifact,
+      "",
+      submission.notes ? `Contributor notes: ${submission.notes}` : "Contributor notes: None",
+      "",
+      review ? `Reviewer: ${getUser(state, review.reviewer_id)?.name || "Reviewer"}; verdict ${review.verdict}; score ${review.score}/5; confidence ${review.reviewer_confidence}/5.` : "Reviewer: Not attached.",
+      review ? `Reviewer notes: ${review.notes}` : "",
+      "",
+      "Attached files:",
+      files.length
+        ? files.map((file) => `- ${file.original_name} (${file.content_type}, ${file.size_bytes} bytes, sha256 ${file.checksum_sha256})`).join("\n")
+        : "- None",
+      ""
+    );
+  });
+
+  lines.push(
+    "## Quality Review Summary",
+    "",
+    packet.review_summary,
+    "",
+    "## Handling Notes",
+    "",
+    packet.risk_notes,
+    "",
+    "## Payout Readiness",
+    "",
+    `Contributor payout total: ${new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0
+    }).format(payoutTotal / 100)}`,
+    `Ready payouts: ${payouts.filter((payout) => payout.status === "ready").length}`,
+    `Pending payouts: ${payouts.filter((payout) => payout.status === "pending").length}`,
+    `Transferred payouts: ${payouts.filter((payout) => payout.status === "transferred").length}`,
+    ""
+  );
+
+  return {
+    title,
+    markdown: `${lines.filter((line) => line !== undefined).join("\n").trim()}\n`
+  };
+}
+
 function updateTaskStatus(state, task) {
   const submissions = taskSubmissions(state, task.id);
   const approved = submissions.filter((submission) => submission.status === "approved");
@@ -409,7 +539,9 @@ function computeMetrics(state) {
     in_review: state.submissions.filter((submission) => submission.status === "submitted").length,
     approved_submissions: state.submissions.filter((submission) => submission.status === "approved").length,
     completed_tasks: state.tasks.filter((task) => task.status === "completed" || task.status === "paid").length,
-    ready_deliveries: state.delivery_packets.filter((packet) => packet.status === "ready").length,
+    ready_deliveries: state.delivery_packets.filter((packet) => {
+      return ["ready", "exported", "changes_requested", "customer_approved", "payout_released", "delivered"].includes(packet.status);
+    }).length,
     verified_contributors: state.contributor_profiles.filter((profile) => profile.verification_tier > 0).length,
     pending_payout_cents: pendingPayoutCents,
     public_good_capacity_pct: totalRewardCents === 0 ? 0 : Math.round((publicGoodRewardCents / totalRewardCents) * 100),
@@ -422,6 +554,7 @@ function clientState(state, context = {}) {
     auth_identities: _authIdentities,
     sessions: _sessions,
     submission_files: submissionFiles,
+    delivery_packets: deliveryPackets,
     ...publicState
   } = state;
   const session = context.session || (context.req ? currentSessionContext(state, context.req)?.session : null);
@@ -431,6 +564,7 @@ function clientState(state, context = {}) {
     auth: auth.publicConfig(),
     session: sessionView(state, session),
     submission_files: (submissionFiles || []).map(publicSubmissionFile),
+    delivery_packets: (deliveryPackets || []).map(publicDeliveryPacket),
     metrics: computeMetrics(state)
   };
 }
@@ -473,7 +607,10 @@ function upsertDeliveryPacket(state, task) {
   const averageConfidence = average(reviews.map((review) => Number(review.reviewer_confidence)));
   const existing = state.delivery_packets.find((packet) => packet.task_id === task.id);
   const previousStatus = existing?.status;
-  const status = approved.length >= task.redundancy_count ? "ready" : "assembling";
+  const readinessStatus = approved.length >= task.redundancy_count ? "ready" : "assembling";
+  const status = existing && ["exported", "changes_requested", "customer_approved", "payout_released", "delivered"].includes(existing.status)
+    ? existing.status
+    : readinessStatus;
   const packet = existing || {
     id: createId("del"),
     task_id: task.id,
@@ -753,6 +890,150 @@ async function assembleDeliveryPacket(req, res, state, taskId) {
   sendJson(res, 201, { delivery_packet: deliveryResult.packet, state: clientState(state, { session }) });
 }
 
+async function exportDeliveryReport(req, res, state, packetId) {
+  const context = requireSession(state, req, ["customer", "reviewer", "admin"]);
+  const { session, user } = context;
+  const packet = state.delivery_packets.find((candidate) => candidate.id === packetId);
+  if (!packet) return sendError(res, 404, "Delivery packet not found.");
+  if (!canAccessDeliveryPacket(state, context, packet)) {
+    return sendError(res, 403, "You do not have access to this delivery packet.");
+  }
+  if (!["ready", "exported", "changes_requested"].includes(packet.status)) {
+    return sendError(res, 409, "Delivery packet must be ready before exporting a report.");
+  }
+
+  const task = getTask(state, packet.task_id);
+  if (!task) return sendError(res, 404, "Task not found.");
+
+  const report = buildDeliveryReport(state, task, packet);
+  Object.assign(packet, {
+    status: "exported",
+    report_title: report.title,
+    report_markdown: report.markdown,
+    report_exported_at: now(),
+    report_exported_by: user.id,
+    updated_at: now()
+  });
+  addActivity(state, "delivery_report_exported", `${user.name} exported a report for "${task.title}".`);
+  await saveState(state);
+  sendJson(res, 201, { delivery_packet: packet, state: clientState(state, { session }) });
+}
+
+async function downloadDeliveryReport(req, res, state, packetId) {
+  const context = requireSession(state, req, ["customer", "reviewer", "admin"]);
+  const packet = state.delivery_packets.find((candidate) => candidate.id === packetId);
+  if (!packet) return sendError(res, 404, "Delivery packet not found.");
+  if (!canAccessDeliveryPacket(state, context, packet)) {
+    return sendError(res, 403, "You do not have access to this delivery report.");
+  }
+  if (!packet.report_markdown) return sendError(res, 404, "Delivery report has not been exported yet.");
+
+  const task = getTask(state, packet.task_id);
+  sendBinary(res, 200, Buffer.from(packet.report_markdown, "utf8"), {
+    "content-type": "text/markdown; charset=utf-8",
+    "content-disposition": attachmentDisposition(reportFileName(task, packet)),
+    "x-content-type-options": "nosniff"
+  });
+}
+
+async function approveDeliveryReport(req, res, state, packetId) {
+  const context = requireSession(state, req, ["customer", "admin"]);
+  const { session, user } = context;
+  const body = await readBody(req);
+  requireFields(body, ["decision"]);
+
+  const packet = state.delivery_packets.find((candidate) => candidate.id === packetId);
+  if (!packet) return sendError(res, 404, "Delivery packet not found.");
+  if (!canAccessDeliveryPacket(state, context, packet)) {
+    return sendError(res, 403, "You do not have access to this delivery packet.");
+  }
+  if (!packet.report_markdown || packet.status !== "exported") {
+    return sendError(res, 409, "Export a delivery report before recording customer approval.");
+  }
+
+  const decision = String(body.decision);
+  if (!["approved", "changes_requested"].includes(decision)) {
+    return sendError(res, 400, "Customer approval decision is invalid.");
+  }
+
+  const task = getTask(state, packet.task_id);
+  const note = String(body.notes || "").trim();
+  if (decision === "approved") {
+    Object.assign(packet, {
+      status: "customer_approved",
+      customer_approved_at: now(),
+      customer_approved_by: user.id,
+      customer_approval_notes: note || "Approved for payout release.",
+      updated_at: now()
+    });
+    addActivity(state, "delivery_report_approved", `${user.name} approved the report for "${task?.title || "a task"}".`);
+  } else {
+    Object.assign(packet, {
+      status: "changes_requested",
+      customer_approved_at: null,
+      customer_approved_by: null,
+      customer_approval_notes: note || "Changes requested before payout release.",
+      updated_at: now()
+    });
+    addActivity(state, "delivery_report_changes_requested", `${user.name} requested report changes for "${task?.title || "a task"}".`);
+  }
+
+  await saveState(state);
+  sendJson(res, 200, { delivery_packet: packet, state: clientState(state, { session }) });
+}
+
+async function releaseDeliveryPayouts(req, res, state, packetId) {
+  const { session, user } = requireSession(state, req, ["admin"]);
+  const body = await readBody(req);
+  const packet = state.delivery_packets.find((candidate) => candidate.id === packetId);
+  if (!packet) return sendError(res, 404, "Delivery packet not found.");
+  if (packet.status !== "customer_approved") {
+    return sendError(res, 409, "Customer approval is required before payout release.");
+  }
+
+  const payouts = packetPayouts(state, packet);
+  if (!payouts.length) return sendError(res, 409, "No payouts are attached to this delivery packet.");
+
+  const releaseable = payouts.filter((payout) => payout.status === "ready");
+  if (!releaseable.length) {
+    return sendError(res, 409, "No Stripe-ready payouts are ready to release.");
+  }
+
+  const releasedAt = now();
+  const note = String(body.note || "").trim() || "Released after customer approval.";
+  releaseable.forEach((payout) => {
+    payout.status = "transferred";
+    payout.stripe_transfer_id ||= `tr_demo_${payout.id.replace(/-/g, "").slice(0, 18)}`;
+    payout.released_at = releasedAt;
+    payout.released_by = user.id;
+    payout.release_note = note;
+
+    const submission = state.submissions.find((candidate) => candidate.id === payout.submission_id);
+    if (submission) submission.status = "paid";
+  });
+
+  const packetPayoutState = packetPayouts(state, packet);
+  const allTransferred = packetPayoutState.every((payout) => payout.status === "transferred");
+  const task = getTask(state, packet.task_id);
+  if (task && allTransferred) task.status = "paid";
+  Object.assign(packet, {
+    status: allTransferred ? "payout_released" : "customer_approved",
+    payout_released_at: releasedAt,
+    payout_released_by: user.id,
+    payout_release_note: note,
+    updated_at: releasedAt
+  });
+
+  const summary = {
+    released_count: releaseable.length,
+    held_count: packetPayoutState.filter((payout) => payout.status === "pending" || payout.status === "held").length,
+    transferred_count: packetPayoutState.filter((payout) => payout.status === "transferred").length
+  };
+  addActivity(state, "payouts_released", `${user.name} released ${summary.released_count} payout${summary.released_count === 1 ? "" : "s"} for "${task?.title || "a task"}".`);
+  await saveState(state);
+  sendJson(res, 200, { delivery_packet: packet, release_summary: summary, state: clientState(state, { session }) });
+}
+
 async function submitScreening(req, res, state) {
   const { session, user } = requireSession(state, req, ["contributor"]);
   const body = await readBody(req);
@@ -896,6 +1177,22 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "tasks" && parts[3] === "delivery-packet") {
     return assembleDeliveryPacket(req, res, state, parts[2]);
+  }
+
+  if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "delivery-packets" && parts[3] === "export") {
+    return exportDeliveryReport(req, res, state, parts[2]);
+  }
+
+  if (req.method === "GET" && parts.length === 4 && parts[0] === "api" && parts[1] === "delivery-packets" && parts[3] === "report") {
+    return downloadDeliveryReport(req, res, state, parts[2]);
+  }
+
+  if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "delivery-packets" && parts[3] === "customer-approval") {
+    return approveDeliveryReport(req, res, state, parts[2]);
+  }
+
+  if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "delivery-packets" && parts[3] === "release-payouts") {
+    return releaseDeliveryPayouts(req, res, state, parts[2]);
   }
 
   if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "submissions" && parts[3] === "reviews") {

@@ -56,6 +56,19 @@ function createClient(baseUrl) {
     return data;
   }
 
+  async function rawRequest(route, options = {}) {
+    const response = await fetch(`${baseUrl}${route}`, {
+      ...options,
+      headers: {
+        ...(cookie ? { cookie } : {}),
+        ...(options.headers || {})
+      }
+    });
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie) cookie = setCookie.split(";")[0];
+    return response;
+  }
+
   return {
     login(userId, role) {
       return clientRequest("/api/test/session", {
@@ -63,7 +76,8 @@ function createClient(baseUrl) {
         body: JSON.stringify({ user_id: userId, role })
       });
     },
-    request: clientRequest
+    request: clientRequest,
+    raw: rawRequest
   };
 }
 
@@ -87,11 +101,13 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     const customerUser = initial.users.find((candidate) => candidate.name === "Elara Singh");
     const reviewerUser = initial.users.find((candidate) => candidate.name === "Sam Rivera");
     const adminUser = initial.users.find((candidate) => candidate.name === "Jaeson Booker");
+    const apolloOrg = initial.customer_orgs.find((candidate) => candidate.name === "Apollo-style Eval Org");
     assert.ok(mayaUser);
     assert.ok(renUser);
     assert.ok(customerUser);
     assert.ok(reviewerUser);
     assert.ok(adminUser);
+    assert.ok(apolloOrg);
 
     await assert.rejects(
       () => request(baseUrl, `/api/tasks/${task.id}/claim`, {
@@ -202,6 +218,96 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     });
     assert.equal(assembled.delivery_packet.status, "ready");
     assert.ok(assembled.delivery_packet.customer_summary.includes("Redundancy target met"));
+
+    await customer.login(customerUser.id, "customer");
+    const customerTask = await customer.request("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Summarize refusal boundary eval findings",
+        description: "Create a concise customer-facing summary from approved refusal boundary findings.",
+        task_type: "research_task",
+        reward_cents: 12000,
+        required_skill_tier: 2,
+        redundancy_count: 1,
+        deadline: "2026-09-18",
+        sponsoring_org_id: apolloOrg.id,
+        commerciality: "commercial",
+        skill_tags: "red teaming, synthesis",
+        acceptance_criteria: "Summarizes the finding.\nSeparates evidence from uncertainty.",
+        deliverable_format: "customer report brief",
+        risk_level: "standard"
+      })
+    });
+
+    const customerOwnedTask = customerTask.task;
+    await maya.request(`/api/tasks/${customerOwnedTask.id}/claim`, {
+      method: "POST",
+      body: "{}"
+    });
+    const customerOwnedSubmission = await maya.request(`/api/tasks/${customerOwnedTask.id}/submissions`, {
+      method: "POST",
+      body: JSON.stringify({
+        artifact: "Refusal boundary summary with three validated patterns and one uncertainty note.",
+        notes: "No sensitive operational detail included."
+      })
+    });
+
+    const customerOwnedReview = await reviewer.request(`/api/submissions/${customerOwnedSubmission.submission.id}/reviews`, {
+      method: "POST",
+      body: JSON.stringify({
+        score: 5,
+        verdict: "approved",
+        reviewer_confidence: 5,
+        notes: "Customer-ready summary with clear uncertainty boundaries."
+      })
+    });
+    let packet = customerOwnedReview.state.delivery_packets.find((candidate) => candidate.task_id === customerOwnedTask.id);
+    assert.equal(packet.status, "ready");
+
+    await assert.rejects(
+      () => admin.request(`/api/delivery-packets/${packet.id}/release-payouts`, {
+        method: "POST",
+        body: "{}"
+      }),
+      (error) => error.statusCode === 409 && error.message.includes("Customer approval")
+    );
+
+    const exported = await customer.request(`/api/delivery-packets/${packet.id}/export`, {
+      method: "POST",
+      body: "{}"
+    });
+    packet = exported.delivery_packet;
+    assert.equal(packet.status, "exported");
+    assert.ok(packet.report_markdown.includes("# Summarize refusal boundary eval findings Delivery Report"));
+
+    const reportResponse = await customer.raw(`/api/delivery-packets/${packet.id}/report`);
+    assert.equal(reportResponse.status, 200);
+    assert.match(reportResponse.headers.get("content-type"), /text\/markdown/);
+    assert.match(await reportResponse.text(), /Customer Summary/);
+
+    const approvedReport = await customer.request(`/api/delivery-packets/${packet.id}/customer-approval`, {
+      method: "POST",
+      body: JSON.stringify({
+        decision: "approved",
+        notes: "Accepted for payout release."
+      })
+    });
+    assert.equal(approvedReport.delivery_packet.status, "customer_approved");
+    assert.equal(approvedReport.delivery_packet.customer_approved_by, customerUser.id);
+
+    const released = await admin.request(`/api/delivery-packets/${packet.id}/release-payouts`, {
+      method: "POST",
+      body: JSON.stringify({
+        note: "Approved report accepted by customer."
+      })
+    });
+    assert.equal(released.release_summary.released_count, 1);
+    assert.equal(released.release_summary.held_count, 0);
+    assert.equal(released.delivery_packet.status, "payout_released");
+    const transferred = released.state.payouts.find((payout) => payout.submission_id === customerOwnedSubmission.submission.id);
+    assert.equal(transferred.status, "transferred");
+    assert.equal(transferred.released_by, adminUser.id);
+    assert.ok(transferred.stripe_transfer_id.startsWith("tr_demo_"));
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await closeStateStore();

@@ -497,7 +497,10 @@ textarea {
 
 .status-pill.open,
 .status-pill.ready,
-.status-pill.approved {
+.status-pill.approved,
+.status-pill.customer_approved,
+.status-pill.payout_released,
+.status-pill.transferred {
   border-color: rgba(15, 118, 110, 0.25);
   background: var(--green-soft);
   color: var(--teal-dark);
@@ -505,14 +508,18 @@ textarea {
 
 .status-pill.claimed,
 .status-pill.in_review,
-.status-pill.pending {
+.status-pill.pending,
+.status-pill.exported,
+.status-pill.changes_requested,
+.status-pill.held {
   border-color: rgba(180, 83, 9, 0.25);
   background: var(--amber-soft);
   color: var(--amber);
 }
 
 .status-pill.rejected,
-.status-pill.sensitive {
+.status-pill.sensitive,
+.status-pill.failed {
   border-color: rgba(190, 58, 52, 0.24);
   background: var(--coral-soft);
   color: var(--coral);
@@ -529,6 +536,10 @@ textarea {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 14px;
+}
+
+.button-row.compact {
+  margin-top: 0;
 }
 
 .btn {
@@ -666,6 +677,11 @@ th {
   line-height: 1.5;
 }
 
+.artifact-block.compact {
+  padding: 10px;
+  font-size: 0.84rem;
+}
+
 .file-list {
   display: grid;
   gap: 8px;
@@ -749,6 +765,51 @@ th {
 .deliverable-card h3 {
   margin: 0;
   font-size: 1rem;
+}
+
+.delivery-control {
+  display: grid;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.delivery-control-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.delivery-control-meta div {
+  min-height: 50px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfa;
+}
+
+.delivery-control-meta span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.delivery-control-meta strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.approval-form,
+.release-form {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.approval-form textarea,
+.release-form textarea {
+  min-height: 76px;
 }
 
 .review-sidebar {
@@ -899,6 +960,7 @@ th {
   .meta-grid,
   .field-grid,
   .network-map,
+  .delivery-control-meta,
   .deliverable-grid {
     grid-template-columns: 1fr;
   }

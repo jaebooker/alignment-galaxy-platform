@@ -45,13 +45,13 @@ npm test
 - Uploaded artifacts: contributors can attach files to submissions, and authorized contributors, reviewers, admins, and owning customers can download them.
 - Customer workspace: create new commercial or public-good tasks and monitor engagement status.
 - Reviewer queue: inspect submitted work, score it, approve or reject it.
-- Customer delivery packets: assemble approved submissions into buyer-facing packets with review summaries.
-- Admin operations: monitor public-good allocation, reputation, review backlog, delivery readiness, and pending payouts.
-- API foundation: task posting, claiming, submission, review, screening, reset, and bootstrap endpoints.
+- Customer delivery packets: assemble approved submissions into buyer-facing packets, export Markdown reports, and record customer approval or requested changes.
+- Admin operations: monitor public-good allocation, reputation, review backlog, delivery readiness, and release customer-approved payouts.
+- API foundation: task posting, claiming, submission, review, delivery export, customer approval, payout release, screening, reset, and bootstrap endpoints.
 - Database foundation: `database/schema.sql` maps the MVP objects to Postgres tables.
 - Storage adapter: `lib/postgresStore.js` reads and writes the app state through the relational schema.
 
 ## Next Build Steps
 
 - Connect Stripe Connect for contributor onboarding and transfers.
-- Turn delivery packets into exported reports with customer approval and payout release controls.
+- Generate branded PDF reports from exported delivery packet Markdown.

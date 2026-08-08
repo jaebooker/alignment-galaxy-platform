@@ -24,9 +24,16 @@ const statusLabels = {
   approved: "Approved",
   rejected: "Rejected",
   assembling: "Assembling",
+  exported: "Exported",
+  changes_requested: "Changes requested",
+  customer_approved: "Customer approved",
+  payout_released: "Payout released",
   delivered: "Delivered",
   pending: "Pending",
   ready: "Ready",
+  transferred: "Transferred",
+  failed: "Failed",
+  held: "Held",
   public_good: "Public good",
   commercial: "Commercial",
   sensitive: "Sensitive",
@@ -59,6 +66,16 @@ function formatBytes(bytes) {
 
 function dateLabel(date) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${date}T12:00:00Z`));
+}
+
+function dateTimeLabel(value) {
+  if (!value) return "Pending";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(value));
 }
 
 function relativeTime(value) {
@@ -142,6 +159,72 @@ function deliveryFileLinks(packet) {
   `;
 }
 
+function packetPayouts(packet) {
+  const approvedIds = new Set(packet.approved_submission_ids || []);
+  return state.payouts.filter((payout) => approvedIds.has(payout.submission_id));
+}
+
+function packetReportUrl(packet) {
+  return `/api/delivery-packets/${encodeURIComponent(packet.id)}/report`;
+}
+
+function payoutSummary(packet) {
+  const payouts = packetPayouts(packet);
+  return {
+    total: payouts.reduce((sum, payout) => sum + payout.amount_cents, 0),
+    ready: payouts.filter((payout) => payout.status === "ready").length,
+    pending: payouts.filter((payout) => payout.status === "pending" || payout.status === "held").length,
+    transferred: payouts.filter((payout) => payout.status === "transferred").length
+  };
+}
+
+function deliveryReportControls(packet, options = {}) {
+  const summary = payoutSummary(packet);
+  const canExport = ["ready", "exported", "changes_requested"].includes(packet.status);
+  const canApprove = options.approval && packet.report_exported_at && packet.status === "exported";
+  const canRelease = options.release && packet.status === "customer_approved" && summary.ready > 0;
+
+  return `
+    <div class="delivery-control">
+      <div class="delivery-control-meta">
+        <div><span>Report</span><strong>${packet.report_exported_at ? dateTimeLabel(packet.report_exported_at) : "Not exported"}</strong></div>
+        <div><span>Customer approval</span><strong>${packet.customer_approved_at ? dateTimeLabel(packet.customer_approved_at) : statusLabels[packet.status] || packet.status}</strong></div>
+        <div><span>Payouts</span><strong>${summary.transferred}/${summary.ready + summary.pending + summary.transferred} released</strong></div>
+      </div>
+      <div class="button-row compact">
+        <button class="btn secondary inline-action" data-action="export-report" data-packet-id="${escapeHtml(packet.id)}" ${canExport ? "" : "disabled"}>Export report</button>
+        ${packet.report_exported_at ? `<a class="btn inline-action" href="${escapeHtml(packetReportUrl(packet))}">Download report</a>` : ""}
+      </div>
+      ${packet.customer_approval_notes ? `<div class="artifact-block compact">${escapeHtml(packet.customer_approval_notes)}</div>` : ""}
+      ${canApprove ? `
+        <form class="approval-form" data-packet-id="${escapeHtml(packet.id)}">
+          <div class="field-grid single">
+            <label>Customer note
+              <textarea name="notes">Approved for payout release.</textarea>
+            </label>
+          </div>
+          <div class="button-row compact">
+            <button class="btn primary inline-action" name="decision" value="approved">Approve</button>
+            <button class="btn warning inline-action" name="decision" value="changes_requested">Request changes</button>
+          </div>
+        </form>
+      ` : ""}
+      ${options.release ? `
+        <form class="release-form" data-packet-id="${escapeHtml(packet.id)}">
+          <div class="field-grid single">
+            <label>Release note
+              <textarea name="note">Customer approved; release ready payouts.</textarea>
+            </label>
+          </div>
+          <div class="button-row compact">
+            <button class="btn primary inline-action" ${canRelease ? "" : "disabled"}>Release ${summary.ready} ready payout${summary.ready === 1 ? "" : "s"}</button>
+          </div>
+        </form>
+      ` : ""}
+    </div>
+  `;
+}
+
 function scoreLabel(value) {
   return value === null || value === undefined ? "Pending" : `${value}/5`;
 }
@@ -182,6 +265,16 @@ function customerOrgsForSession() {
   if (!userId) return [];
   if (activeRole === "admin") return state.customer_orgs.filter((org) => org.vetting_status === "approved");
   return state.customer_orgs.filter((org) => org.contact_user_id === userId && org.vetting_status === "approved");
+}
+
+function customerTasksForSession() {
+  const orgIds = new Set(customerOrgsForSession().map((org) => org.id));
+  return state.tasks.filter((task) => orgIds.has(task.sponsoring_org_id));
+}
+
+function customerPacketsForSession() {
+  const taskIds = new Set(customerTasksForSession().map((task) => task.id));
+  return (state.delivery_packets || []).filter((packet) => taskIds.has(packet.task_id));
 }
 
 function selectedTask() {
@@ -481,9 +574,10 @@ function contributorView() {
 }
 
 function customerTaskRows() {
-  return state.tasks.map((task) => {
+  return customerTasksForSession().map((task) => {
     const approvedCount = approvedSubmissionsFor(task.id).length;
     const packet = packetForTask(task.id);
+    const reportReady = packet?.report_exported_at;
     return `
       <tr>
         <td><strong>${escapeHtml(task.title)}</strong><br><span class="tag">${escapeHtml(task.task_type.replaceAll("_", " "))}</span></td>
@@ -494,6 +588,8 @@ function customerTaskRows() {
         <td>${dateLabel(task.deadline)}</td>
         <td>
           <button class="btn inline-action" data-action="assemble-packet" data-task-id="${escapeHtml(task.id)}" ${approvedCount === 0 ? "disabled" : ""}>Assemble</button>
+          <button class="btn inline-action secondary" data-action="export-report" data-packet-id="${escapeHtml(packet?.id || "")}" ${packet && ["ready", "exported", "changes_requested"].includes(packet.status) ? "" : "disabled"}>Export</button>
+          ${reportReady ? `<a class="btn inline-action" href="${escapeHtml(packetReportUrl(packet))}">Report</a>` : ""}
         </td>
       </tr>
     `;
@@ -501,12 +597,12 @@ function customerTaskRows() {
 }
 
 function customerDeliverables() {
-  const packets = state.delivery_packets || [];
+  const packets = customerPacketsForSession();
   return `
     <section class="panel">
       <div class="panel-header">
         <h2>Delivery packets</h2>
-        <span class="status-pill ready">${state.metrics.ready_deliveries} ready</span>
+        <span class="status-pill ready">${packets.length} packets</span>
       </div>
       ${packets.length ? `
         <div class="deliverable-grid">
@@ -529,6 +625,7 @@ function customerDeliverables() {
                 <div class="artifact-block">${escapeHtml(packet.review_summary)}</div>
                 ${deliveryFileLinks(packet)}
                 <div class="artifact-block">${escapeHtml(packet.risk_notes)}</div>
+                ${deliveryReportControls(packet, { approval: activeRole === "customer" })}
               </article>
             `;
           }).join("")}
@@ -642,7 +739,7 @@ Can be reviewed without private customer context.</textarea>
       <section class="panel">
         <div class="panel-header">
           <h2>Org tasks</h2>
-          <span class="status-pill open">${state.tasks.length} records</span>
+          <span class="status-pill open">${customerTasksForSession().length} records</span>
         </div>
         <div class="table-wrap">
           <table>
@@ -835,7 +932,7 @@ function adminView() {
               <div class="payout-row">
                 <div>
                   <strong>${escapeHtml(userName(payout.contributor_id))}</strong>
-                  <p>${money(payout.amount_cents)} contributor payout · ${money(payout.platform_fee_cents)} platform fee</p>
+                  <p>${money(payout.amount_cents)} contributor payout · ${money(payout.platform_fee_cents)} platform fee${payout.released_at ? ` · ${escapeHtml(dateTimeLabel(payout.released_at))}` : ""}</p>
                 </div>
                 ${statusPill(payout.status)}
               </div>
@@ -867,6 +964,7 @@ function adminView() {
                     <div><span>Confidence</span><strong>${scoreLabel(packet.average_reviewer_confidence)}</strong></div>
                   </div>
                   ${deliveryFileLinks(packet)}
+                  ${deliveryReportControls(packet, { release: activeRole === "admin" })}
                 </article>
               `;
             }).join("")}
@@ -909,8 +1007,8 @@ function adminView() {
               <tr><td>submissions</td><td>Contributor artifacts awaiting QC</td><td>${state.submissions.length}</td></tr>
               <tr><td>submission_files</td><td>Uploaded artifact binaries and checksums</td><td>${state.submission_files.length}</td></tr>
               <tr><td>reviews</td><td>Verdicts, confidence, scoring notes</td><td>${state.reviews.length}</td></tr>
-              <tr><td>delivery_packets</td><td>Customer-ready approved work bundles</td><td>${packets.length}</td></tr>
-              <tr><td>payouts</td><td>Stripe transfer-ready approved work</td><td>${state.payouts.length}</td></tr>
+              <tr><td>delivery_packets</td><td>Exported reports, customer approval, release gates</td><td>${packets.length}</td></tr>
+              <tr><td>payouts</td><td>Contributor transfers after customer acceptance</td><td>${state.payouts.length}</td></tr>
             </tbody>
           </table>
         </div>
@@ -1115,6 +1213,65 @@ function bindEvents() {
         });
         state = result.state;
         showToast("Delivery packet assembled.");
+        render();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-action='export-report']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!button.dataset.packetId) return;
+      try {
+        const result = await api(`/api/delivery-packets/${button.dataset.packetId}/export`, {
+          method: "POST",
+          body: "{}"
+        });
+        state = result.state;
+        showToast("Report exported.");
+        render();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll(".approval-form").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const formData = new FormData(form);
+      const decision = event.submitter?.value || "approved";
+      try {
+        const result = await api(`/api/delivery-packets/${form.dataset.packetId}/customer-approval`, {
+          method: "POST",
+          body: JSON.stringify({
+            decision,
+            notes: formData.get("notes")
+          })
+        });
+        state = result.state;
+        showToast(decision === "approved" ? "Report approved." : "Changes requested.");
+        render();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  document.querySelectorAll(".release-form").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const formData = new FormData(form);
+      try {
+        const result = await api(`/api/delivery-packets/${form.dataset.packetId}/release-payouts`, {
+          method: "POST",
+          body: JSON.stringify({
+            note: formData.get("note")
+          })
+        });
+        state = result.state;
+        showToast(`${result.release_summary.released_count} payout${result.release_summary.released_count === 1 ? "" : "s"} released.`);
         render();
       } catch (error) {
         showToast(error.message);

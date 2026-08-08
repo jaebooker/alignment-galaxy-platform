@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS payouts (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'ready', 'transferred', 'failed', 'held')),
   stripe_transfer_id TEXT,
+  released_at TIMESTAMPTZ,
+  released_by UUID REFERENCES users(id),
+  release_note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -167,7 +170,7 @@ CREATE TABLE IF NOT EXISTS delivery_packets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id UUID NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'assembling'
-    CHECK (status IN ('assembling', 'ready', 'delivered')),
+    CHECK (status IN ('assembling', 'ready', 'exported', 'changes_requested', 'customer_approved', 'payout_released', 'delivered')),
   approved_submission_ids UUID[] NOT NULL DEFAULT '{}',
   approved_count INTEGER NOT NULL DEFAULT 0,
   required_count INTEGER NOT NULL DEFAULT 1,
@@ -176,10 +179,42 @@ CREATE TABLE IF NOT EXISTS delivery_packets (
   customer_summary TEXT NOT NULL,
   review_summary TEXT NOT NULL,
   risk_notes TEXT NOT NULL,
+  report_title TEXT,
+  report_markdown TEXT,
+  report_exported_at TIMESTAMPTZ,
+  report_exported_by UUID REFERENCES users(id),
+  customer_approved_at TIMESTAMPTZ,
+  customer_approved_by UUID REFERENCES users(id),
+  customer_approval_notes TEXT,
+  payout_released_at TIMESTAMPTZ,
+  payout_released_by UUID REFERENCES users(id),
+  payout_release_note TEXT,
   delivered_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE payouts
+  ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS released_by UUID REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS release_note TEXT;
+
+ALTER TABLE delivery_packets
+  ADD COLUMN IF NOT EXISTS report_title TEXT,
+  ADD COLUMN IF NOT EXISTS report_markdown TEXT,
+  ADD COLUMN IF NOT EXISTS report_exported_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS report_exported_by UUID REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS customer_approved_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS customer_approved_by UUID REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS customer_approval_notes TEXT,
+  ADD COLUMN IF NOT EXISTS payout_released_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS payout_released_by UUID REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS payout_release_note TEXT;
+
+ALTER TABLE delivery_packets DROP CONSTRAINT IF EXISTS delivery_packets_status_check;
+ALTER TABLE delivery_packets
+  ADD CONSTRAINT delivery_packets_status_check
+  CHECK (status IN ('assembling', 'ready', 'exported', 'changes_requested', 'customer_approved', 'payout_released', 'delivered'));
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_commerciality ON tasks(commerciality);
