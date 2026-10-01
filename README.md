@@ -41,7 +41,7 @@ npm start
 npm test
 ```
 
-`npm test` runs the Postgres smoke test when `DATABASE_URL` or `TEST_DATABASE_URL` is present. Without a database URL, the integration test is skipped.
+`npm test` runs the Postgres smoke and workflow tests when `DATABASE_URL` or `TEST_DATABASE_URL` is present. Without a database URL, the integration test is skipped.
 
 ## Implemented Flows
 
@@ -50,14 +50,29 @@ npm test
 - Uploaded artifacts: contributors can attach files to submissions, and authorized contributors, reviewers, admins, and owning customers can download them.
 - Stripe Connect onboarding: contributors can start hosted onboarding, sync account requirements, and expose payout readiness to review/admin workflows.
 - Customer workspace: create new commercial or public-good tasks and monitor engagement status.
-- Reviewer queue: inspect submitted work, score it, approve or reject it.
+- Reviewer queue: inspect submitted work, score it, approve, reject, or request changes. Reviewers cannot review their own work; contributors can revise after a needs-changes verdict, and a rejection frees the claim slot.
 - Customer delivery packets: assemble approved submissions into buyer-facing packets, export Markdown reports, and record customer approval or requested changes.
 - Admin operations: monitor public-good allocation, reputation, review backlog, delivery readiness, and release customer-approved payouts through Stripe transfers.
 - API foundation: task posting, claiming, submission, review, delivery export, customer approval, payout release, screening, reset, and bootstrap endpoints.
 - Database foundation: `database/schema.sql` maps the MVP objects to Postgres tables.
 - Storage adapter: `lib/postgresStore.js` reads and writes the app state through the relational schema.
 
+## Data Visibility
+
+`/api/bootstrap` and every mutation response return only what the caller's active role needs (`lib/visibility.js`). Signed-out visitors get aggregate metrics only. Contributors see open tasks and their own submissions, reviews and payouts. Customers see their organization's tasks, approved work and delivery packets. Reviewers see the review queue without contact details or payouts. Admins see everything except sessions and OAuth identities.
+
+## Concurrency
+
+Every non-GET API request runs inside one Postgres transaction holding an advisory lock (`runMutation` in `server.js`), and its response is sent only after commit. Concurrent requests are serialized, so one write cannot overwrite another.
+
+## Demo Reset
+
+`POST /api/reset` wipes all data and uploaded files. It is available only when `ALLOW_TEST_AUTH=true` or `ALLOW_DATA_RESET=true`; an admin role alone is not enough.
+
 ## Next Build Steps
+
+- Have reviewers grade screening responses instead of granting tier 1 on submission.
+- Replace full-snapshot writes with per-entity repository methods (see `database/repository-contract.md`).
 
 - Add Stripe webhooks for account requirement changes and transfer failure reconciliation.
 - Generate branded PDF reports from exported delivery packet Markdown.

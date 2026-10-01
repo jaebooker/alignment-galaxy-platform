@@ -7,6 +7,7 @@ const { createFileStorage } = require("./lib/fileStorage");
 const { createOAuthClient } = require("./lib/oauth");
 const { createPostgresStore, hashSessionToken } = require("./lib/postgresStore");
 const { createStripeConnectClient } = require("./lib/stripeConnect");
+const { scopeStateForViewer } = require("./lib/visibility");
 
 const ROOT = __dirname;
 loadEnv(path.join(ROOT, ".env"));
@@ -32,6 +33,7 @@ const DEFAULT_REVIEW_STANDARDS = [
   "Reviewer notes identify false positive risks, false negative risks, and any recommended follow-up."
 ];
 const MAX_MULTIPART_FILES = 5;
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
 
 function now() {
   return new Date().toISOString();
@@ -51,12 +53,47 @@ const auth = createOAuthClient({ now: () => new Date() });
 const fileStorage = createFileStorage({ now });
 const stripeConnect = createStripeConnectClient({ now });
 
+const DIRTY = Symbol("dirty");
+
 async function loadState() {
   return store.read();
 }
 
+// Handlers run inside `runMutation`; this marks the state for writing at commit.
 async function saveState(state) {
-  await store.write(state);
+  state[DIRTY] = true;
+}
+
+// Buffers what a handler sends so nothing reaches the client until the transaction commits.
+function deferResponse(res) {
+  let head = null;
+  let body;
+  return {
+    get headersSent() {
+      return head !== null;
+    },
+    writeHead(statusCode, headers = {}) {
+      head = { statusCode, headers };
+      return this;
+    },
+    end(chunk) {
+      body = chunk;
+    },
+    flush() {
+      if (!head) return;
+      res.writeHead(head.statusCode, head.headers);
+      res.end(body);
+    }
+  };
+}
+
+async function runMutation(res, work) {
+  const deferred = deferResponse(res);
+  await store.transaction(
+    (state) => work(state, deferred),
+    { shouldWrite: (state) => state[DIRTY] === true }
+  );
+  deferred.flush();
 }
 
 async function resetState() {
@@ -280,8 +317,12 @@ function findOrCreateOAuthUser(state, profile) {
   });
   let user = identity ? getUser(state, identity.user_id) : null;
 
-  if (!user && profile.email_verified !== false) {
-    user = state.users.find((candidate) => candidate.email.toLowerCase() === email);
+  if (!user) {
+    const emailOwner = state.users.find((candidate) => candidate.email.toLowerCase() === email);
+    if (emailOwner && profile.email_verified !== true) {
+      throw httpError(403, "Your provider has not verified this email, so it cannot be linked to an existing account.");
+    }
+    user = emailOwner || null;
   }
   if (!user && profile.email_verified === false) {
     throw httpError(403, "OAuth email must be verified before account creation.");
@@ -330,7 +371,12 @@ function findOrCreateOAuthUser(state, profile) {
 
 async function readBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_JSON_BODY_BYTES) throw httpError(413, "Request body is too large.");
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -615,22 +661,17 @@ function computeMetrics(state) {
 }
 
 function clientState(state, context = {}) {
-  const {
-    auth_identities: _authIdentities,
-    sessions: _sessions,
-    submission_files: submissionFiles,
-    delivery_packets: deliveryPackets,
-    ...publicState
-  } = state;
   const session = context.session || (context.req ? currentSessionContext(state, context.req)?.session : null);
+  const scoped = scopeStateForViewer(state, session ? { userId: session.user_id, role: session.active_role } : null);
 
   return {
-    ...publicState,
+    ...scoped,
     auth: auth.publicConfig(),
     stripe: stripeConnect.publicConfig(),
+    demo_reset_enabled: dataResetEnabled(),
     session: sessionView(state, session),
-    submission_files: (submissionFiles || []).map(publicSubmissionFile),
-    delivery_packets: (deliveryPackets || []).map(publicDeliveryPacket),
+    submission_files: scoped.submission_files.map(publicSubmissionFile),
+    delivery_packets: scoped.delivery_packets.map(publicDeliveryPacket),
     metrics: computeMetrics(state)
   };
 }
@@ -764,6 +805,12 @@ async function createTask(req, res, state) {
   if (!Number.isInteger(task.redundancy_count) || task.redundancy_count < 1) {
     return sendError(res, 400, "Redundancy count must be at least 1.");
   }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(task.deadline)) || Number.isNaN(Date.parse(`${task.deadline}T00:00:00Z`))) {
+    return sendError(res, 400, "Deadline must be a valid YYYY-MM-DD date.");
+  }
+  if (task.deadline < now().slice(0, 10)) {
+    return sendError(res, 400, "Deadline cannot be in the past.");
+  }
 
   state.tasks.unshift(task);
   addActivity(state, "task_created", `${org.name} posted "${task.title}".`);
@@ -778,6 +825,10 @@ async function claimTask(req, res, state, taskId) {
   if (!task) return sendError(res, 404, "Task not found.");
   if (!["open", "claimed", "in_review"].includes(task.status)) return sendError(res, 409, "Task is not claimable.");
   if (task.claimed_by.includes(user.id)) return sendError(res, 409, "Contributor already claimed this task.");
+  const rejected = state.submissions.some((submission) => {
+    return submission.task_id === taskId && submission.contributor_id === user.id && submission.status === "rejected";
+  });
+  if (rejected) return sendError(res, 409, "A rejected submission cannot be reclaimed on the same task.");
   if (task.claimed_by.length >= task.redundancy_count) return sendError(res, 409, "Task already has the required contributor redundancy.");
 
   if (!user || !user.roles.includes("contributor") || user.verification_status !== "verified") {
@@ -792,7 +843,8 @@ async function claimTask(req, res, state, taskId) {
   updateTaskStatus(state, task);
   addActivity(state, "task_claimed", `${user.name} claimed "${task.title}".`);
   await saveState(state);
-  sendJson(res, 200, { task, state: clientState(state, { session }) });
+  const view = clientState(state, { session });
+  sendJson(res, 200, { task: view.tasks.find((candidate) => candidate.id === task.id), state: view });
 }
 
 async function submitTask(req, res, state, taskId) {
@@ -809,7 +861,9 @@ async function submitTask(req, res, state, taskId) {
   if (!task.claimed_by.includes(user.id)) {
     return sendError(res, 403, "Contributor must claim a task before submitting work.");
   }
-  const existing = state.submissions.find((submission) => submission.task_id === taskId && submission.contributor_id === user.id);
+  const existing = state.submissions.find((submission) => {
+    return submission.task_id === taskId && submission.contributor_id === user.id && submission.status !== "needs_changes";
+  });
   if (existing) return sendError(res, 409, "Contributor already submitted work for this task.");
 
   const submission = {
@@ -837,11 +891,12 @@ async function submitTask(req, res, state, taskId) {
   updateTaskStatus(state, task);
   addActivity(state, "submission_created", `${user.name} submitted work${savedFiles.length ? ` with ${savedFiles.length} file${savedFiles.length === 1 ? "" : "s"}` : ""} for "${task.title}".`);
   await saveState(state);
+  const view = clientState(state, { session });
   sendJson(res, 201, {
     submission,
     files: savedFiles.map(publicSubmissionFile),
-    task,
-    state: clientState(state, { session })
+    task: view.tasks.find((candidate) => candidate.id === task.id),
+    state: view
   });
 }
 
@@ -863,6 +918,16 @@ async function downloadSubmissionFile(req, res, state, submissionId, fileId) {
   });
 }
 
+// Needs-changes verdicts are revisions in progress, so they count toward neither side.
+function refreshContributorTrackRecord(state, profile) {
+  const decided = state.submissions.filter((submission) => {
+    return submission.contributor_id === profile.user_id && ["approved", "paid", "rejected"].includes(submission.status);
+  });
+  const approved = decided.filter((submission) => submission.status !== "rejected").length;
+  profile.completed_tasks = approved;
+  profile.approval_rate = decided.length ? approved / decided.length : 0;
+}
+
 async function reviewSubmission(req, res, state, submissionId) {
   const { session, user: reviewer } = requireSession(state, req, ["reviewer", "admin"]);
   const body = await readBody(req);
@@ -871,6 +936,7 @@ async function reviewSubmission(req, res, state, submissionId) {
   const submission = state.submissions.find((candidate) => candidate.id === submissionId);
   if (!submission) return sendError(res, 404, "Submission not found.");
   if (submission.status !== "submitted") return sendError(res, 409, "Submission has already been reviewed.");
+  if (submission.contributor_id === reviewer.id) return sendError(res, 403, "Reviewers cannot review their own submissions.");
 
   const score = Number(body.score);
   if (!Number.isInteger(score) || score < 1 || score > 5) return sendError(res, 400, "Review score must be between 1 and 5.");
@@ -887,7 +953,7 @@ async function reviewSubmission(req, res, state, submissionId) {
     created_at: now()
   };
 
-  submission.status = body.verdict === "approved" ? "approved" : "rejected";
+  submission.status = body.verdict;
   submission.review_outcome = body.verdict;
   submission.score = score;
   state.reviews.unshift(review);
@@ -912,17 +978,19 @@ async function reviewSubmission(req, res, state, submissionId) {
     state.payouts.unshift(payout);
 
     if (profile) {
-      profile.completed_tasks += 1;
-      const oldApproved = Math.round(profile.approval_rate * Math.max(profile.completed_tasks - 1, 1));
-      profile.approval_rate = Math.min(1, (oldApproved + 1) / profile.completed_tasks);
       profile.reputation_score = Math.min(100, Math.round(profile.reputation_score + score * review.reviewer_confidence));
-      if (profile.completed_tasks >= 5 && profile.reputation_score >= 75) {
-        profile.verification_tier = Math.max(profile.verification_tier, 2);
-      }
     }
-  } else if (profile) {
-    profile.approval_rate = Math.max(0, profile.approval_rate - 0.06);
-    profile.reputation_score = Math.max(0, Math.round(profile.reputation_score - 5));
+  } else if (body.verdict === "rejected") {
+    // Frees the slot so another contributor can take it; the redundancy target is still unmet.
+    task.claimed_by = task.claimed_by.filter((contributorId) => contributorId !== submission.contributor_id);
+    if (profile) profile.reputation_score = Math.max(0, Math.round(profile.reputation_score - 5));
+  }
+
+  if (profile) {
+    refreshContributorTrackRecord(state, profile);
+    if (profile.completed_tasks >= 5 && profile.reputation_score >= 75) {
+      profile.verification_tier = Math.max(profile.verification_tier, 2);
+    }
   }
 
   updateTaskStatus(state, task);
@@ -1062,7 +1130,7 @@ async function releaseDeliveryPayouts(req, res, state, packetId) {
 
   const releaseable = payouts.filter((payout) => {
     const profile = getContributorProfile(state, payout.contributor_id);
-    return payout.status === "ready" && contributorCanReceiveTransfers(profile);
+    return ["ready", "failed"].includes(payout.status) && contributorCanReceiveTransfers(profile);
   });
   if (!releaseable.length) {
     return sendError(res, 409, "No payouts have Stripe-ready connected accounts.");
@@ -1161,8 +1229,11 @@ async function syncStripeProfile(req, res, state) {
 }
 
 async function handleStripeConnectReturn(req, res, url) {
-  const state = await loadState();
-  const { session, user } = requireSession(state, req, ["contributor"]);
+  return runMutation(res, (state, deferred) => stripeConnectReturn(req, deferred, url, state));
+}
+
+async function stripeConnectReturn(req, res, url, state) {
+  const { user } = requireSession(state, req, ["contributor"]);
   const profile = getContributorProfile(state, user.id);
   if (!profile) return sendRedirect(res, "/");
 
@@ -1179,7 +1250,10 @@ async function handleStripeConnectReturn(req, res, url) {
 }
 
 async function handleStripeConnectRefresh(req, res, url) {
-  const state = await loadState();
+  return runMutation(res, (state, deferred) => stripeConnectRefresh(req, deferred, url, state));
+}
+
+async function stripeConnectRefresh(req, res, url, state) {
   const { user } = requireSession(state, req, ["contributor"]);
   const profile = getContributorProfile(state, user.id);
   const accountId = url.searchParams.get("account") || profile?.stripe_connect_account_id;
@@ -1221,14 +1295,15 @@ async function beginOAuthLogin(req, res, url) {
 
 async function completeOAuthLogin(req, res, url) {
   const result = await auth.callbackResult(req, url);
-  const state = await loadState();
-  const user = findOrCreateOAuthUser(state, result.profile);
-  const activeRole = resolveActiveRole(user, result.requestedRole);
-  const { session, token } = createSessionForUser(state, user, activeRole);
-  addActivity(state, "session_created", `${user.name} signed in with ${auth.publicConfig().provider}.`);
-  await saveState(state);
-  sendRedirect(res, result.returnTo || "/", {
-    "set-cookie": [sessionCookie(token), result.clearCookie]
+  await runMutation(res, async (state, deferred) => {
+    const user = findOrCreateOAuthUser(state, result.profile);
+    const activeRole = resolveActiveRole(user, result.requestedRole);
+    const { token } = createSessionForUser(state, user, activeRole);
+    addActivity(state, "session_created", `${user.name} signed in with ${auth.publicConfig().provider}.`);
+    await saveState(state);
+    sendRedirect(deferred, result.returnTo || "/", {
+      "set-cookie": [sessionCookie(token), result.clearCookie]
+    });
   });
 }
 
@@ -1283,8 +1358,30 @@ async function logoutSession(req, res, state) {
   });
 }
 
+function dataResetEnabled() {
+  return testAuthEnabled() || process.env.ALLOW_DATA_RESET === "true";
+}
+
 async function handleApi(req, res, url) {
-  const state = await loadState();
+  if (req.method === "GET" || req.method === "HEAD") {
+    const state = await loadState();
+    return routeApi(req, res, url, state);
+  }
+
+  // Reset takes its own lock, so it must not run inside a mutation transaction.
+  if (req.method === "POST" && url.pathname === "/api/reset") {
+    if (!dataResetEnabled()) return sendError(res, 404, "API route not found.");
+    await fileStorage.clear();
+    const reset = await resetState();
+    return sendJson(res, 200, clientState(reset), {
+      "set-cookie": clearSessionCookie()
+    });
+  }
+
+  return runMutation(res, (state, deferred) => routeApi(req, deferred, url, state));
+}
+
+async function routeApi(req, res, url, state) {
   const parts = url.pathname.split("/").filter(Boolean);
 
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
@@ -1309,17 +1406,6 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/session/logout") {
     return logoutSession(req, res, state);
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/reset") {
-    if (!testAuthEnabled() && process.env.ALLOW_DATA_RESET !== "true") {
-      requireSession(state, req, ["admin"]);
-    }
-    await fileStorage.clear();
-    const reset = await resetState();
-    return sendJson(res, 200, clientState(reset), {
-      "set-cookie": clearSessionCookie()
-    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/tasks") {
@@ -1439,7 +1525,10 @@ function createAppServer() {
         await serveStatic(req, res, url);
       }
     } catch (error) {
-      sendError(res, error.statusCode || 500, error.message || "Internal server error");
+      if (res.headersSent) return res.end();
+      if (!error.statusCode || error.statusCode >= 500) console.error(error);
+      const message = error.statusCode ? error.message : "Internal server error";
+      sendError(res, error.statusCode || 500, message);
     }
   });
 }

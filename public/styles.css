@@ -511,6 +511,7 @@ textarea {
 .status-pill.pending,
 .status-pill.exported,
 .status-pill.changes_requested,
+.status-pill.needs_changes,
 .status-pill.held {
   border-color: rgba(180, 83, 9, 0.25);
   background: var(--amber-soft);

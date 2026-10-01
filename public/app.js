@@ -23,6 +23,7 @@ const statusLabels = {
   submitted: "Submitted",
   approved: "Approved",
   rejected: "Rejected",
+  needs_changes: "Needs changes",
   assembling: "Assembling",
   exported: "Exported",
   changes_requested: "Changes requested",
@@ -66,6 +67,10 @@ function formatBytes(bytes) {
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
   if (value >= 1024) return `${Math.round(value / 1024)} KB`;
   return `${value} B`;
+}
+
+function isoDateFromToday(days) {
+  return new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
 }
 
 function dateLabel(date) {
@@ -176,7 +181,7 @@ function payoutSummary(packet) {
   const payouts = packetPayouts(packet);
   return {
     total: payouts.reduce((sum, payout) => sum + payout.amount_cents, 0),
-    ready: payouts.filter((payout) => payout.status === "ready").length,
+    ready: payouts.filter((payout) => payout.status === "ready" || payout.status === "failed").length,
     pending: payouts.filter((payout) => payout.status === "pending" || payout.status === "held").length,
     transferred: payouts.filter((payout) => payout.status === "transferred").length
   };
@@ -389,7 +394,7 @@ function header() {
             <strong>${escapeHtml(session.user.name)}</strong>
           </div>
           <button class="btn" data-action="logout" title="Sign out">Sign out</button>
-          ${session.active_role === "admin" ? `<button class="btn" data-action="reset" title="Reset demo data">Reset</button>` : ""}
+          ${session.active_role === "admin" && state.demo_reset_enabled ? `<button class="btn" data-action="reset" title="Reset demo data">Reset</button>` : ""}
         ` : `
           <button class="btn primary" data-action="sign-in" title="Sign in with ${escapeHtml(auth.provider)}">Sign in</button>
         `}
@@ -454,7 +459,7 @@ function quickStats() {
 }
 
 function taskCard(task) {
-  const submissions = submissionsFor(task.id);
+  const submissionCount = task.submission_count ?? submissionsFor(task.id).length;
   const selected = task.id === selectedTaskId ? "selected" : "";
   return `
     <article class="task-card ${selected}" data-task-id="${escapeHtml(task.id)}">
@@ -471,7 +476,7 @@ function taskCard(task) {
       <div class="meta-grid">
         <div><span>Reward</span><strong>${money(task.reward_cents)}</strong></div>
         <div><span>Tier</span><strong>${task.required_skill_tier}</strong></div>
-        <div><span>Redundancy</span><strong>${submissions.length}/${task.redundancy_count}</strong></div>
+        <div><span>Redundancy</span><strong>${submissionCount}/${task.redundancy_count}</strong></div>
       </div>
       ${tags(task.skill_tags)}
     </article>
@@ -484,9 +489,11 @@ function taskDetail(task) {
   const contributorId = currentUserId();
   const profile = profileFor(contributorId) || { verification_tier: 0 };
   const claimed = task.claimed_by.includes(contributorId);
-  const submitted = state.submissions.some((submission) => submission.task_id === task.id && submission.contributor_id === contributorId);
+  const ownSubmissions = state.submissions.filter((submission) => submission.task_id === task.id && submission.contributor_id === contributorId);
+  const submitted = ownSubmissions.some((submission) => submission.status !== "needs_changes");
+  const revisionRequested = !submitted && ownSubmissions.some((submission) => submission.status === "needs_changes");
   const blockedByTier = profile.verification_tier < task.required_skill_tier;
-  const full = task.claimed_by.length >= task.redundancy_count;
+  const full = (task.claimed_count ?? task.claimed_by.length) >= task.redundancy_count;
   const claimDisabled = blockedByTier || claimed || full || !["open", "claimed", "in_review"].includes(task.status);
 
   return `
@@ -513,6 +520,7 @@ function taskDetail(task) {
         </div>
         ${claimed ? `
           <div class="divider"></div>
+          ${revisionRequested ? `<div class="artifact-block compact">Reviewer requested changes. Submit a revised artifact below.</div>` : ""}
           <form class="submission-form" data-task-id="${escapeHtml(task.id)}">
             <div class="field-grid single">
               <label>Artifact
@@ -561,6 +569,37 @@ function stripeConnectPanel(profile) {
   `;
 }
 
+function ownSubmissionsPanel() {
+  const own = state.submissions.filter((submission) => submission.contributor_id === currentUserId());
+  if (!own.length) return "";
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Your submissions</h2>
+        <span class="status-pill open">${own.length}</span>
+      </div>
+      <div class="comparison-list">
+        ${own.map((submission) => {
+          const task = state.tasks.find((candidate) => candidate.id === submission.task_id);
+          const review = reviewForSubmission(submission.id);
+          return `
+            <div class="comparison-item">
+              <div class="task-topline">
+                <div>
+                  <strong>${escapeHtml(task?.title || "Task")}</strong>
+                  <p>${escapeHtml(relativeTime(submission.created_at))}</p>
+                </div>
+                ${statusPill(submission.status)}
+              </div>
+              ${review ? `<div class="artifact-block compact">Reviewer feedback (${review.score}/5): ${escapeHtml(review.notes)}</div>` : ""}
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function contributorView() {
   const task = selectedTask();
   const profile = profileFor(currentUserId()) || { verification_tier: 0, reputation_score: 0, approval_rate: 0 };
@@ -588,6 +627,7 @@ function contributorView() {
         </section>
         ${taskDetail(task)}
       </div>
+      ${ownSubmissionsPanel()}
       <section class="form-panel" id="screening">
         <div class="panel-header">
           <h2>Screening task</h2>
@@ -723,7 +763,7 @@ function customerView() {
                 <input name="redundancy_count" type="number" min="1" max="5" value="3" required>
               </label>
               <label>Deadline
-                <input name="deadline" type="date" value="2026-09-11" required>
+                <input name="deadline" type="date" value="${isoDateFromToday(14)}" min="${isoDateFromToday(0)}" required>
               </label>
               <label>Sponsor
                 <select name="sponsoring_org_id">
@@ -892,6 +932,7 @@ function reviewerView() {
               <div class="artifact-block">${escapeHtml(submission.notes || "No reviewer notes.")}</div>
               ${submissionFileLinks(submission.id)}
               ${peerSubmissionList(peerSubmissions, submission.id)}
+              ${submission.contributor_id === currentUserId() ? `<div class="empty-state">This is your own submission. Another reviewer must record the verdict.</div>` : `
               <form class="review-form" data-submission-id="${escapeHtml(submission.id)}">
                 <div class="field-grid">
                   <label>Verdict
@@ -916,7 +957,7 @@ function reviewerView() {
                 <div class="button-row">
                   <button class="btn primary">Record verdict</button>
                 </div>
-              </form>
+              </form>`}
             </div>
           ` : `<div class="empty-state">No submitted work is waiting for review.</div>`}
         </section>

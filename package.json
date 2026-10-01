@@ -5,7 +5,7 @@
   "description": "Alignment Galaxy MVP platform scaffold for distributed AI safety tasks.",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
     "pg": "^8.13.1"
