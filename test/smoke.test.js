@@ -6,6 +6,15 @@ if (databaseUrl) process.env.DATABASE_URL = databaseUrl;
 process.env.ALLOW_TEST_AUTH = "true";
 
 const { closeStateStore, createAppServer } = require("../server");
+const seed = require("../data/seed.json");
+
+function seedUser(name) {
+  return seed.users.find((candidate) => candidate.name === name);
+}
+
+function futureDate(days = 30) {
+  return new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+}
 
 function startServer() {
   const server = createAppServer();
@@ -93,15 +102,17 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     const initial = await request(baseUrl, "/api/bootstrap");
     assert.equal(initial.metrics.open_tasks, 2);
     assert.equal(initial.metrics.in_review, 1);
+    assert.deepEqual(initial.users, []);
+    assert.deepEqual(initial.submissions, []);
 
-    const task = initial.tasks.find((candidate) => candidate.title === "Generate eval cases for deceptive planning");
+    const task = seed.tasks.find((candidate) => candidate.title === "Generate eval cases for deceptive planning");
     assert.ok(task);
-    const mayaUser = initial.users.find((candidate) => candidate.name === "Maya Chen");
-    const renUser = initial.users.find((candidate) => candidate.name === "Ren Okafor");
-    const customerUser = initial.users.find((candidate) => candidate.name === "Elara Singh");
-    const reviewerUser = initial.users.find((candidate) => candidate.name === "Sam Rivera");
-    const adminUser = initial.users.find((candidate) => candidate.name === "Jaeson Booker");
-    const apolloOrg = initial.customer_orgs.find((candidate) => candidate.name === "Apollo-style Eval Org");
+    const mayaUser = seedUser("Maya Chen");
+    const renUser = seedUser("Ren Okafor");
+    const customerUser = seedUser("Elara Singh");
+    const reviewerUser = seedUser("Sam Rivera");
+    const adminUser = seedUser("Jaeson Booker");
+    const apolloOrg = seed.customer_orgs.find((candidate) => candidate.name === "Apollo-style Eval Org");
     assert.ok(mayaUser);
     assert.ok(renUser);
     assert.ok(customerUser);
@@ -191,8 +202,11 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
     });
 
     assert.equal(reviewResponse.submission.status, "approved");
-    assert.equal(reviewResponse.state.payouts.length, 1);
-    assert.equal(reviewResponse.state.payouts[0].amount_cents, 21000);
+    assert.deepEqual(reviewResponse.state.payouts, []);
+    const adminSnapshot = createClient(baseUrl);
+    const afterFirstReview = (await adminSnapshot.login(adminUser.id, "admin")).state;
+    assert.equal(afterFirstReview.payouts.length, 1);
+    assert.equal(afterFirstReview.payouts[0].amount_cents, 21000);
     assert.equal(reviewResponse.state.delivery_packets[0].status, "assembling");
     assert.ok(reviewResponse.state.activity[0].message.includes("approved"));
     assert.equal(reviewResponse.review.reviewer_id, reviewerUser.id);
@@ -210,7 +224,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
 
     const completedTask = secondReviewResponse.state.tasks.find((candidate) => candidate.id === task.id);
     assert.equal(completedTask.status, "completed");
-    assert.equal(secondReviewResponse.state.payouts.length, 2);
+    assert.equal((await adminSnapshot.request("/api/bootstrap")).payouts.length, 2);
     assert.equal(secondReviewResponse.state.delivery_packets[0].status, "ready");
     assert.equal(secondReviewResponse.state.delivery_packets[0].approved_count, 2);
     assert.equal(secondReviewResponse.state.metrics.ready_deliveries, 1);
@@ -242,7 +256,7 @@ test("core marketplace loop claims, submits, reviews, and prepares delivery", {
         reward_cents: 12000,
         required_skill_tier: 2,
         redundancy_count: 1,
-        deadline: "2026-09-18",
+        deadline: futureDate(),
         sponsoring_org_id: apolloOrg.id,
         commerciality: "commercial",
         skill_tags: "red teaming, synthesis",
